@@ -10,9 +10,6 @@
 	Test program demonstrating the Magellan AO guider using
 	a Galil DMC 4060 controller. Compiles under Windows/Cygwin.
 
-	TO DO:
-		A routine to back off a limit switch
-		Review code to account for no vector motion when limits are hit (need single-axis routines)
 
 */
 
