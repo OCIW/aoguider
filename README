@@ -1,1 +1,3 @@
-aoguider is a 
+aoguider tests the Magellan Adaptive Optics guider functions and
+provides example code for running it. User instructions are at
+https://github.com/OCIW/aoguider/wiki/aoguider.
