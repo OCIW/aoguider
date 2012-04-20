@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+    <meta charset='utf-8' />
+    <meta http-equiv="X-UA-Compatible" content="chrome=1" />
+    <meta name="description" content="Magellan AO Guider : Technical Reference" />
+
+    <link rel="stylesheet" type="text/css" media="screen" href="stylesheets/stylesheet.css">
+
+    <title>Magellan AO Guider</title>
+  </head>
+
+  <body>
+
+    <!-- HEADER -->
+    <div id="header_wrap" class="outer">
+        <header class="inner">
+          <a id="forkme_banner" href="https://github.com/OCIW/aoguider">Fork Me on GitHub</a>
+
+          <h1 id="project_title">Magellan AO Guider</h1>
+          <h2 id="project_tagline">Technical Reference</h2>
+
+          <section id="downloads">
+            <a class="zip_download_link" href="https://github.com/OCIW/aoguider/zipball/master">Download this project as a .zip file</a>
+            <a class="tar_download_link" href="https://github.com/OCIW/aoguider/tarball/master">Download this project as a tar.gz file</a>
+          </section>
+        </header>
+    </div>
+
+    <!-- MAIN CONTENT -->
+    <div id="main_content_wrap" class="outer">
+      <section id="main_content" class="inner">
+        <h1>Introduction</h1>
+
+<p>The MagAO guider provides the adaptive optics system with the object acquisition and wavefront sensing data needed to set up on an AO target. Moving to the telescope’s field center, it locates a star in a wide field acquisition camera and the operator adjusts the telescope pointing. The guider then inserts a lenslet array into the beam and the operator starts the active optics system. After the telescope primary is adjusted and the telescope is collimated and focussed, the guider moves off the central field and parks for the duration of the adaptive optics exposure. </p>
+
+<p>The MagAO guider occupies half the space in the MagAO NAS ring. A standard Magellan guider has two camera stages for simultaneous guiding and wavefront sensing but since the MagAO system only needs this for initial setup one set is enough. It is mechanically similar to other standard Magellan large guiders in that it patrols the Magellan telescope field in an X-Y Cartesian area but the motion control components (motors, actuators) are derived from the Magellan IMACS guiding systems.</p>
+
+<p>After the control system was built, we changed the motion controller to a Galil DMC system, which was being adopted site-wide for most instruments. This change required a major re-build of the electronics chassis, explaining some of the unusual layout choices in the box as well as signal names that change along a wire.</p>
+
+<h1>Hardware</h1>
+
+<h2>Motion controller Galil 4060</h2>
+
+<p>The full part number is DMC-4060(DIN,TRES)-CO12(5V,P422)(STEP)-I200. This is a six-axis motion control system with Ethernet and RS485 interfaces. Purchased from Galil Motion Control, 3750 Atherton Road, Rocklin, CA 95765 ($3085.00 each).</p>
+
+<p>Code <a href="https://github.com/OCIW/aoguider/blob/master/aoguider.c">aoguider.c</a></p>
+      </section>
+    </div>
+
+    <!-- FOOTER  -->
+    <div id="footer_wrap" class="outer">
+      <footer class="inner">
+        <p class="copyright">Magellan AO Guider maintained by <a href="https://github.com/OCIW">OCIW</a></p>
+        <p>Published with <a href="http://pages.github.com">GitHub Pages</a></p>
+      </footer>
+    </div>
+
+    
+
+  </body>
+</html>
