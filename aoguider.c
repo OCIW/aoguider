@@ -1,8 +1,6 @@
-/*-------------------------------------------------------------------
--------------------------------------------------------------------*/
-
 /* aoguider
 
+	2012-04-30 au - calibrations for new lead screw & focus motor
 	2012-04-12 au - added calibration routine
 	2012-04-06 au - added homing routine
 	2012-04-05 au - start
@@ -10,19 +8,27 @@
 	Test program demonstrating the Magellan AO guider using
 	a Galil DMC 4060 controller. Compiles under Windows/Cygwin.
 
-
 */
 
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
+//#include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
-#include <fcntl.h>
+#include <math.h>
+#include <arpa/inet.h>
+
+#define CYGWIN
+#ifdef CYGWIN
 #include <cygwin/in.h>
-//#include <netinet/in.h>
+#else
+#include <netinet/in.h>
+#endif
 
 //#define GALILIP	"192.168.1.2"		// Generic private IP address
 #define GALILIP 	"192.91.178.197"	// Jorge's sodium
+#define GALILPORT	8079
 
 #define XAXIS		1
 #define YAXIS		2
@@ -34,13 +40,6 @@
 #define BLOCKING	0
 #define NONBLOCKING	1
 
-#define LEDERROR	1
-#define CONNECTERROR	2
-#define SOCKETERROR	3
-#define INETPTONERROR	4
-#define BADMOVE		5
-
-#define NOTHOMED	6
 #define FOCUSREL	3
 #define FOCUSABS	2
 #define ABSOLUTE	1
@@ -52,29 +51,38 @@
 #define STATUS		2
 #define	PASS		1
 #define FAIL		0
-#define UNKNOWN		-1
+
+// air cylinder sensors
 #define RETRACT		0
 #define EXTEND		1
+#define UNKNOWN		-1
+#define BOTHSENSORS	-2
+#define BADAXIS		-999999
 
 #define	IN		1
 #define OUT		0
 
-#define XMAXSTEPS	21000		// Maximum x-motor steps after homing
-#define YMAXSTEPS	13000		// Maximum y-motor steps after homing
-#define	ZMAXSTEPS	5000		// Maximum z-motor steps after homing
+#define XMAXSTEPS	20847		// Maximum x-motor steps after homing
+#define YMAXSTEPS	64596		// Maximum y-motor steps after homing
+#define	ZMAXSTEPS	87424		// Maximum z-motor steps after homing
 #define XSTEPSPERTURN	500		// Motor steps in 360 degrees
 #define YSTEPSPERTURN	500
-#define ZSTEPSPERTURN	200
+#define ZSTEPSPERTURN	4000
 #define XENCPULSPERTURN	2000
 #define YENCPULSPERTURN	2000
-#define XSCREWPITCH	6.0
-#define YSCREWPITCH	6.0
+#define XSCREWPITCH	0.0625
+#define YSCREWPITCH	0.0625
+#define ZSCREWPITCH	0.050
 
 //X and Y axis defaults
-#define DEFSPEED	2000		// Speed
-#define DEFACCEL	9000		// Acceleration
-#define DEFDECEL	20000		// Deceleration
-#define LIMITHYSTER	40		// Limit switch hysteresis
+#define XYSPEED		3800		// Speed
+#define XYACCEL		9000		// Acceleration
+#define XYDECEL		20000		// Deceleration
+#define XYLIMITHYSTER	150		// Limit switch hysteresis
+#define ZSPEED		4000
+#define ZACCEL		128000
+#define ZDECEL		128000
+#define ZLIMITHYSTER	2700
 
 // Function prototypes
 void	backOff();
@@ -85,25 +93,29 @@ int	askGalilForInt(char *);
 long int askGalilForLong(char *);
 int	limitSwitch(int);
 int	brake(int, int);
-int	calibrate(void);
+void	calibrate(void);
 void	cmdLoop(void);
-long int creepToLimits(int, int, int);
+int	creepToLimits(int, int, int);
 int	cylinder(int, int);
 void	debug(void);
 long int encPosition(int);
-void	errmsg(int);
 int	fieldCam(void);
 int	fieldLens(void);
 void	focus(int);
 void	focusRel(long int);
 int	getKey(void);
 //int	getLimits(int);
-int	help(void);
-int	homeAxes(void);
+void	help(void);
+void	homeAxes(void);
 void	initGuider(void);
-int	ledInOut(void);
+int	isHomed(void);
+int	isMoving(int);
+int	led(int);
+int	ledInOut(int);
+int	motorPower(int, int);
 void	move(int);
-void	moveAbs(float, float);
+int	moveAbs(float, float);
+void	moveOneAxis(int, int, int);
 void	moveRel(long int, long int);
 float	mmPosition(int);
 void	passthru(void);
@@ -114,12 +126,11 @@ void	setMode(int);
 int	smallAp(void);
 void	statusPrint(void);
 long int stepPosition(int);
-int	tellGalil(char *);
+char	*tellGalil(char *);
 int	telnetToGalil(char *);
 void	testFunction(void);
 
 /* Globals */
-
 int galilfd = -1;			// file descriptor to Galil
 int debugFlag = 0;			// Turn on debug print statements
 int isCalibrated = 0;
@@ -141,6 +152,10 @@ char *argc[];
 		strcpy(ipaddress, GALILIP);
 	}
 	galilfd = telnetToGalil(ipaddress);
+	if (galilfd < 0) {
+		printf("Connection to %s failed (return code %d)\n", GALILIP, galilfd);
+		return(0);
+	}
 	for (;;) {
 		cmdLoop();
 	}
@@ -149,7 +164,7 @@ char *argc[];
 
 /*-------------------------------------------------------------------
 
-	askGalil(cmd, buf, n);
+	askGalil(cmd, buf, n);  (LIBRARY)
 
 	askGalil sends a command string (cmd) to the Galil controller
 	and returns the controller's reply in buf. n is the available
@@ -162,8 +177,8 @@ char *argc[];
 	the command sent to the Galil. The reply string from the Galil
 	is returned in buf.
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
-
 void askGalil(cmd, buf, n)
 char *cmd, *buf;
 int n;
@@ -175,13 +190,13 @@ int n;
 	strcat(cmdstr, "\r");
 	write(galilfd, cmdstr, strlen(cmdstr));
 	memset(buf, 0, n);
-	read (galilfd, buf, n);
+	read(galilfd, buf, n);
 
 }
 
 /*-------------------------------------------------------------------
 
-	askGalilForInt(cmd);
+	int askGalilForInt(cmd); (LIBRARY)
 
 	askGalilForInt sends the command string (cmd) to the Galil
 	controller and returns the Galil reply as an integer.
@@ -189,6 +204,7 @@ int n;
 	cmd is a pointer to a NUL terminated string containing a
 	Galil command that returns an integer (as do most commands).
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 
 int askGalilForInt(cmd)
@@ -198,16 +214,13 @@ char *cmd;
 	char buf[80];
 
 	askGalil(cmd, buf, 80);
-	if (debugFlag) {
-		printf("asking %s\n",cmd);
-	}
 	return(atoi(buf));
 
 }
 
 /*-------------------------------------------------------------------
 
-	askGalilForLong(cmd);
+	long int askGalilForLong(cmd); (LIBRARY)
 
 	askGalilForLong sends the command string (cmd) to the Galil
 	controller and returns the Galil reply as a long integer.
@@ -215,8 +228,8 @@ char *cmd;
 	cmd is a pointer to a NUL terminated string containing a
 	Galil command that returns an integer (as do most commands).
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
-
 long int askGalilForLong(cmd)
 char *cmd;
 {
@@ -230,13 +243,14 @@ char *cmd;
 
 /*-------------------------------------------------------------------
 
-	int limitSwitch(axis);
+	int limitSwitch(axis) (LIBRARY)
 
 	limitSwitch returns an integer with bits 0 and 1 indicating
 	the reverse and forward limit switch states respectively.
 	If the limit is engaged, the bit is 1 and motion is diabled
 	in that direction. If the limit is not engaged the bit is 0.
 
+Checked 2012-04-26
 -------------------------------------------------------------------*/
 int limitSwitch(axis)
 {
@@ -258,8 +272,7 @@ int limitSwitch(axis)
 			break;
 
 		default:
-			printf("askLimits(%d) was sent a bad axis value\n", axis);
-			return(UNKNOWN);
+			return(BADAXIS);
 	}
 
 
@@ -276,63 +289,59 @@ int limitSwitch(axis)
 
 /*-------------------------------------------------------------------
 
-	backOff();
+	void backOff(); (LIBRARY)
 
 	backOff clears a limit switch situation by searching for
 	engaged limits and backing away a few steps.
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 void backOff()
 {
 
 	int testVal;
 
-	if (testVal = limitSwitch(XAXIS)) {
+	if ((testVal = limitSwitch(XAXIS))) {
 		if (testVal & 0x01) {
-			moveOneAxis(XAXIS, 500, 500);
-			motorPower(XAXIS, OFF);
+			creepToLimits(XAXIS, 20, XYSPEED/4);
 		} else if (testVal & 0x02) {
-			moveOneAxis(XAXIS, -500, 500);
-			motorPower(XAXIS, OFF);
+			creepToLimits(XAXIS, -20, XYSPEED/4);
 		}
 	}
 
-	if (testVal = limitSwitch(YAXIS)) {
+	if ((testVal = limitSwitch(YAXIS))) {
 		if (testVal & 0x01) {
-			moveOneAxis(YAXIS, 500, 500);
-			motorPower(YAXIS, OFF);
+			creepToLimits(YAXIS, 20, XYSPEED/4);
 		} else if (testVal & 0x02) {
-			moveOneAxis(YAXIS, -500, 500);
-			motorPower(YAXIS, OFF);
+			creepToLimits(YAXIS, -20, XYSPEED/4);
 		}
 	}
-	if (testVal = limitSwitch(ZAXIS)) {
+	if ((testVal = limitSwitch(ZAXIS))) {
 		if (testVal & 0x01) {
-			moveOneAxis(ZAXIS, 200, 500);
-			motorPower(ZAXIS, OFF);
+			creepToLimits(ZAXIS, 200, ZSPEED/4);
 		} else if (testVal & 0x02) {
-			moveOneAxis(ZAXIS, -200, 500);
-			motorPower(ZAXIS, OFF);
+			creepToLimits(ZAXIS, -200, ZSPEED/4);
 		}
 	}
 
-}	
+}
 
 /*-------------------------------------------------------------------
 
-	brake(axis, onOffStatus);
+	int brake(axis, onOffStatus);
 
 	brake(axis, onOffStatus) sets or releases a motor brake or
-	returns the current brake state for the selected axis.  Only
+	returns the current brake state for the selected axis. Only
 	the X and Y axes on the Magellan AO guider have brakes, so
-	axis can only be one of [XAXIS|YAXIS]. onOffStatus can be
-	[ON|OFF|STATUS]. Values returned may be [ON|OFF|UNKNOWN]
+	axis can only be one of XAXIS, YAXIS. onOffStatus can be
+	ON, OFF, or STATUS. Values returned may be ON, OFF,
+	UNKNOWN, or BADAXIS.
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 int brake(axis, onOffStatus)
+int axis, onOffStatus;
 {
-
-	int testVal;
 
 	if (onOffStatus == STATUS) {
 		switch (axis) {
@@ -354,15 +363,13 @@ int brake(axis, onOffStatus)
 				return(UNKNOWN);
 
 			default:
-				printf("brake() was passed a bad axis (%d)\n", axis);
-				return(UNKNOWN);
+				return(BADAXIS);
 		}
 	}
 
 	if (onOffStatus == ON) {
 		switch (axis) {
 			case XAXIS:
-				usleep(50000);
 				tellGalil("CB1");
 				if (askGalilForInt("MG@OUT[1]") == 0) {
 					return(ON);
@@ -370,7 +377,6 @@ int brake(axis, onOffStatus)
 					return(UNKNOWN);
 				}
 			case YAXIS:
-				usleep(500000);
 				tellGalil("CB2");
 				if (askGalilForInt("MG@OUT[2]") == 0) {
 					return(ON);
@@ -378,15 +384,12 @@ int brake(axis, onOffStatus)
 					return(UNKNOWN);
 				}
 			default:
-				printf("brake(%d, %d) was passed a bad axis for brake ON\n", axis, onOffStatus);
-				return(UNKNOWN);
+				return(BADAXIS);
 		}
 	} else if (onOffStatus == OFF) {
-		usleep(25000);
 		switch (axis) {
 			case XAXIS:
 				tellGalil("SB1");
-				usleep(50000);
 				if (askGalilForInt("MG@OUT[1]")) {
 					return(OFF);
 				} else {
@@ -394,18 +397,15 @@ int brake(axis, onOffStatus)
 				}
 			case YAXIS:
 				tellGalil("SB2");
-				usleep(50000);
 				if (askGalilForInt("MG@OUT[2]")) {
 					return(OFF);
 				} else {
 					return(UNKNOWN);
 				}
 			default:
-				printf("brake(%d, OFF) was sent bad axis value\n", axis);
-				return(UNKNOWN);
+				return(BADAXIS);
 		}
 	} else {
-		printf("brake(%d,%d) was sent a bad onOffStatus option\n", axis, onOffStatus);
 		return(UNKNOWN);
 	}
 }
@@ -426,65 +426,45 @@ int brake(axis, onOffStatus)
 	
 	This routine must be called before any absolute position move.
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
-int calibrate()
+void calibrate()
 {
-
-	printf("calibrating; ");
-	fflush(stdout);
 
 	homeAxes();
 
-	// get encoder position at (0,0)
-	printf("xEncOffset = %ld", xEncOffset);
-	printf("yEncOffset = %ld", yEncOffset);
-
-// go to the reverse limit
-	moveOneAxis(YAXIS, -20000, 1500);
-	motorPower(YAXIS, OFF);
-	moveOneAxis(XAXIS, -23000, 1500);
+	// go to the reverse limit
+	creepToLimits(XAXIS, -25000, XYSPEED);
+	moveOneAxis(XAXIS, 150, XYSPEED/2);
+	while (isMoving(XAXIS)) {
+		}
+	creepToLimits(XAXIS, 5, XYSPEED/2);
+	moveOneAxis(XAXIS, XSTEPSPERTURN, XYSPEED/2);
 	motorPower(XAXIS, OFF);
 
-// back off hysteresis
-	moveOneAxis(XAXIS, LIMITHYSTER, 1500);
-	motorPower(XAXIS, OFF);
-	moveOneAxis(YAXIS, LIMITHYSTER, 1500);
+	creepToLimits(YAXIS, -25000, XYSPEED);
+	moveOneAxis(YAXIS, 150, XYSPEED/2);
+	while (isMoving(YAXIS)) {
+		}
+	creepToLimits(YAXIS, 5, XYSPEED/2);
+	moveOneAxis(YAXIS, YSTEPSPERTURN, XYSPEED/2);
 	motorPower(YAXIS, OFF);
 
-// find the edge
-	creepToLimits(XAXIS, 1, 20);
-	creepToLimits(YAXIS, 1, 20);
-
-// At reverse limits
-	printf("xSteps at reverse limit = %d\n", stepPosition(XAXIS));
-	printf("ySteps at reverse limit = %d\n", stepPosition(YAXIS));
-
-// Set global xEncPerStep, yEncPerStep
+	// Set global xEncPerStep, yEncPerStep
 	xEncPerStep = (float) (encPosition(XAXIS) - xEncOffset) / (float) stepPosition(XAXIS);
 	yEncPerStep = (float) (encPosition(YAXIS) - yEncOffset) / (float) stepPosition(YAXIS);
-	printf("xEncPerStep = %7.5f\n", xEncPerStep);
-	printf("yEncPerStep = %7.5f\n", yEncPerStep);
 
-	moveOneAxis(XAXIS, XSTEPSPERTURN/2, 1500);		// Half turn back
-	moveOneAxis(YAXIS, YSTEPSPERTURN/2, 1500);
-
-// Set global xEncMin, yEncMin
+	// Set global xEncMin, yEncMin
 	xEncMin = encPosition(XAXIS);
 	yEncMin = encPosition(YAXIS);
 
-	printf("X-Y min values: %ld %ld\n", xEncMin, yEncMin);
-	printf("X-Y max values: %7.3f %7.3f (mm)\n", mmPosition(XAXIS), mmPosition(YAXIS));
-	fflush(stdout);
-
 	isCalibrated = 1;
-
-	return(0);
 
 }
 
 /*-------------------------------------------------------------------
 
-	cmdLoop()
+	void cmdLoop()
 	
 	Polls the keyboard for a one-key command.
 	
@@ -503,29 +483,69 @@ void cmdLoop()
 	}
 
 	if (cmd == 'a') {		// Insert the small aperture
+		printf("aperture, small");
+		fflush(stdout);
 		smallAp();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'A') {	// Insert the field lens
+		printf("field lens");
+		fflush(stdout);
 		fieldLens();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'B') {	// Back off limits
+		printf("Backoff limits");
+		fflush(stdout);
 		backOff();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'C') {	// Calibrate
+		printf("Calibrate");
+		fflush(stdout);
 		calibrate();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'D') {	// Demo mode 
+		printf("Demo");
+		fflush(stdout);
 		demo();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'd') {	// Toggle debug flag
+		printf("debug flag");
+		fflush(stdout);
 		debug();
-	} else if (cmd == 'H') {	// Home the X and Y axes
-		homeAxes();
-	} else if (cmd == 'h') {	// list commands help
-		help();
-	} else if (cmd == 'F') {	// Focus to absolute position
-		focus(FOCUSABS);
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'f') {	// focus relative
 		focus(FOCUSREL);
+	} else if (cmd == 'F') {	// Focus to absolute position
+		focus(FOCUSABS);
+	} else if (cmd == 'h') {	// list commands help
+		help();
+	} else if (cmd == 'H') {	// Home the X and Y axes
+		printf("Home");
+		fflush(stdout);
+		homeAxes();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'i') {	// Initialize
+		printf("initializing");
+		fflush(stdout);
 		initGuider();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'l') {	// Set up LED with S-H
-		ledInOut();
+		printf("led ");
+		if (ledInOut(STATUS) == IN) {
+			ledInOut(OUT);
+			printf("out.\n");
+		} else {
+			ledInOut(IN);
+			printf("in.\n");
+		}
+		fflush(stdout);
 	} else if (cmd == 'm') {	// relative position move
 		move(RELATIVE);
 	} else if (cmd == 'M') {	// absolute position move
@@ -533,21 +553,39 @@ void cmdLoop()
 	} else if (cmd == 'q') {	// quit
 		exit(0);
 	} else if (cmd == 'R') {	// Reset
+		printf("Reset");
+		fflush(stdout);
 		resetGalil();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'S') {	// Self check
+		printf("Self check ");
+		fflush(stdout);
 		selfCheck();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 's') {	// Set up for Shack-Hartmann
+		printf("shack-Hartmann lenslets in");
+		fflush(stdout);
 		shCam();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'T') {	// Run the Test function
+		printf("Test function");
+		fflush(stdout);
 		testFunction();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == 'w') {	// Set up for wide field viewing
+		printf("wide field camera");
+		fflush(stdout);
 		fieldCam();
+		printf(".\n");
+		fflush(stdout);
 	} else if (cmd == '?') {	// status
 		statusPrint();
 	} else if (cmd == ':') {	// Talk directly to the Galil
 		passthru();
-//	} else if (cmd == '$') {
-//		fakeHome();		// testing home function (REMOVE LATER)
 	} else {
 		printf("%c? Type \"h\" for command list help\n", cmd);
 		fflush(stdout);
@@ -558,7 +596,7 @@ void cmdLoop()
 
 /*-------------------------------------------------------------------
 
-	creepToLimits(axis, steps, speed);
+	int creepToLimits(axis, steps, speed); (LIBRARY)
 
 	creepToLimits moves the selected motor axis in increments of
 	"steps" at the selected "speed" until that axis's limit switch
@@ -568,13 +606,20 @@ void cmdLoop()
 	Pay attention the step direction since you don't want to travel
 	the full length of the stage at slow speed.
 
+	Returns 1 for success, 0 if you used a bad axis value or
+	the step size was small and the process timed out before
+	reaching the limit.
+
+Checked 2012-04-30
 -------------------------------------------------------------------*/
-long int creepToLimits(axis, steps, speed)
+int creepToLimits(axis, steps, speed)
 int axis, steps, speed;
 {
 
 	char axischar;
-	int i, oldLimits;
+	int i, oldLimits, maxLoops;
+
+	maxLoops = 200;
 
 	switch (axis) {
 
@@ -582,8 +627,10 @@ int axis, steps, speed;
 			axischar = 'A';
 			i = 0;
 			oldLimits = limitSwitch(XAXIS);
-			while (oldLimits == limitSwitch(XAXIS) && i < 200) {	// wait until the switch changes state
+			while (oldLimits == limitSwitch(XAXIS) && i < maxLoops) {	// wait until the switch changes state
 				moveOneAxis(XAXIS, steps, speed);
+				while (isMoving(XAXIS)) {
+					}
 				i++;
 			}
 			motorPower(XAXIS, OFF);
@@ -593,8 +640,10 @@ int axis, steps, speed;
 			axischar = 'B';
 			i = 0;
 			oldLimits = limitSwitch(YAXIS);
-			while (oldLimits == limitSwitch(YAXIS) && i < 200) {
+			while (oldLimits == limitSwitch(YAXIS) && i < maxLoops) {
 				moveOneAxis(YAXIS, steps, speed);
+				while (isMoving(YAXIS)) {
+					}
 				i++;
 			}
 			motorPower(YAXIS, OFF);
@@ -604,38 +653,48 @@ int axis, steps, speed;
 			axischar = 'C';
 			i = 0;
 			oldLimits = limitSwitch(ZAXIS);
-			while (oldLimits == limitSwitch(ZAXIS) && i < 200) {
+			while (oldLimits == limitSwitch(ZAXIS) && i < maxLoops) {
 				moveOneAxis(ZAXIS, steps, speed);
+				while (isMoving(ZAXIS)) {
+					}
 				i++;
 			}
-			motorPower(ZAXIS, ON);
+			motorPower(ZAXIS, OFF);
 			break;
 
 		default:
-			printf("creepToLimits(%d, STEPS, SPEED) was sent a bad axis value\n", axis);
-			return(UNKNOWN);
+			return(0);
 
+	}
+	if (i <= maxLoops) {
+		return(1);
+	} else {
+		return(0);
 	}
 }
 
 /*-------------------------------------------------------------------
 
-	cylinder(axis, exRetStatus)
+	int cylinder(axis, exRetStatus); (LIBRARY)
 	
 	cylinder sets or returns information on the three pneumatic
-	cylinders. "axis" should be [Y1AXIS|Y2AXIS|SAXIS] and 
-	exRetStatus" should be one of [EXTEND|RETRACT|STATUS].
+	cylinders. "axis" should be one of Y1AXIS, Y2AXIS, or SAXIS
+	and "exRetStatus" should be one of EXTEND, RETRACT, STATUS.
 	
 	EXTEND and RETRACT cause that action to be performed. STATUS
-	returns one of EXTEND, RETRACT, or UNKNOWN.
+	returns one of EXTEND, RETRACT, UNKNOWN, BOTHSENSORS, or
+	BADAXIS. UNKNOWN and BOTHSENSORS probably indicate a
+	timeout situation due to low air pressure. BADAXIS means
+	that you called the routine with an invalid axis.
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 int cylinder(axis, extRetStatus)
+int axis, extRetStatus;
 {
 
 	int i, status, y1e, y1r, y2e, y2r;
 	static int sAxisStatus = UNKNOWN;
-
 
 	if (extRetStatus == STATUS) {
 
@@ -644,12 +703,9 @@ int cylinder(axis, extRetStatus)
 		y1r = ((status>>5) & 0x01);
 		y2e = ((status>>2) & 0x01);
 		y2r = ((status>>3) & 0x01);
-		if (debugFlag) {
-			printf("y1e,y1r,y2e,y2r = %d,%d,%d,%d\n", y1e,y1r,y2e,y2r);
-		}
+
 		if ((y1e == y1r) || (y2e == y2r)) {
-			printf("cylinder(%d,STATUS) error: both sensors the same\n", axis);
-			return(UNKNOWN);
+			return(BOTHSENSORS);
 		}
 
 		switch(axis) {
@@ -672,8 +728,7 @@ int cylinder(axis, extRetStatus)
 				return(sAxisStatus);
 
 			default:
-				printf("cylinder(%d,STATUS) was passed a bad axis value\n", axis);
-				return(UNKNOWN);
+				return(BADAXIS);
 
 		}
 
@@ -690,7 +745,6 @@ int cylinder(axis, extRetStatus)
 						return(RETRACT);
 					}
 				}
-				printf("cylinder(Y1AXIS,RETRACT) timeout\n");
 				return(UNKNOWN);
 
 			case Y2AXIS:
@@ -704,7 +758,6 @@ int cylinder(axis, extRetStatus)
 						return(RETRACT);
 					}
 				}
-				printf("cylinder(Y2AXIS,RETRACT) timeout\n");
 				return(UNKNOWN);
 
 			case SAXIS:
@@ -714,8 +767,7 @@ int cylinder(axis, extRetStatus)
 				return(RETRACT);
 
 			default:
-				printf("cylinder(%d,RETRACT) was passed a bad axis\n", axis);
-				return(UNKNOWN);
+				return(BADAXIS);
 		}
 
 	} else if (extRetStatus == EXTEND) {
@@ -733,10 +785,6 @@ int cylinder(axis, extRetStatus)
 						return(EXTEND);
 					}
 				}
-				if (debugFlag) {
-					printf("y1e = %d, y1r = %d\n", y1e,y1r);
-				}
-				printf("cylinder(Y2AXIS,EXTEND) timeout\n");
 				return(UNKNOWN);
 
 			case Y2AXIS:
@@ -750,7 +798,6 @@ int cylinder(axis, extRetStatus)
 						return(EXTEND);
 					}
 				}
-				printf("cylinder(Y2AXIS,EXTEND) timeout\n");
 				return(UNKNOWN);
 
 			case SAXIS:
@@ -760,12 +807,10 @@ int cylinder(axis, extRetStatus)
 				return(EXTEND);
 
 			default:
-				printf("cylinder(%d,EXTEND) was passed a bad axis\n", axis, extRetStatus);
-				return(UNKNOWN);
+				return(BADAXIS);
 		} 
 	} else {
-		printf("cylinder(%d,%d) was passed a bad extRetStatus\n", axis, extRetStatus);
-		return(UNKNOWN);
+		return(BADAXIS);
 	}
 }
 
@@ -801,7 +846,6 @@ void debug()
 void demo()
 {
 
-	char buf[80];
 	float x, y, z, randomNum;
 
 	if (! isCalibrated) {
@@ -852,11 +896,13 @@ void demo()
 
 /*-------------------------------------------------------------------
 
-	encPosition(axis)
+	long int encPosition(axis)
 	
-	encPosition returns the current encoder position of the selected
-	axis. "axis" may be either XAXIS or YAXIS.
+	encPosition returns the current encoder position of the
+	selected axis. "axis" may be either XAXIS or YAXIS (the
+	focus axis does not have an encoder).
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 long int encPosition(axis)
 int axis;
@@ -866,24 +912,34 @@ int axis;
 
 		case XAXIS:
 			return(askGalilForLong("TPA"));
+
 		case YAXIS:
 			return(askGalilForLong("TPB"));
+
 		default:
-			printf("encPosition(%d) was passed a bad axis value\n", axis);
-			return(UNKNOWN);
+			return(BADAXIS);
+
 	}
+
 }
 
 /*-------------------------------------------------------------------
 
 	mmPosition(axis)
 	
-	mmPosition returns the current position in mm away from the home
-	position of the selected axis. "axis" may be either XAXIS or
-	YAXIS. This position is computed from the manufacturer's specs
-	on the pitch of the lead screw and the number of pulses per turn
-	sent by the encoder.
+	mmPosition returns the current X-Y position in inches away
+	from the home position of the selected axis based on the
+	rotary encoders. "axis" may be either XAXIS or YAXIS. This
+	position is computed from the manufacturer's specs on the
+	pitch of the lead screw and the measured number of pulses
+	per turn sent by the encoder (computed with the calibrate()
+	routine).
 
+	The name should be changed to inchPosition since it now
+	reports inches (this change was made after swapping out
+	the old lead screws with new inch-based ones).
+
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 float mmPosition(axis)
 int axis;
@@ -897,45 +953,7 @@ int axis;
 			return((float) ((yEncOffset - encPosition(YAXIS)) * YSCREWPITCH) / (float) (YENCPULSPERTURN));
 
 		default:
-			printf("floatToMm(%d) was passed a bad axis\n", axis);
-			return(-999.0);
-	}
-}
-
-/*-------------------------------------------------------------------
-
-	errmsg(errnum)
-	
-	errmsg prints an error message. Most error messages are printed
-	inside the relevant routines, though.
-
--------------------------------------------------------------------*/
-void errmsg(errnum)
-int errnum;
-{
-
-	switch (errnum) {
-		case LEDERROR:
-			printf("led error\n");
-			fflush(stdout);
-			break;
-		case CONNECTERROR:
-			printf("connect() failed to %s\n", GALILIP);
-			exit(0);
-		case SOCKETERROR:
-			printf("socket() failed\n");
-			exit(0);
-		case INETPTONERROR:
-			printf("inet_pton() failed\n");
-			exit(0);
-		case BADMOVE:
-			printf("Move command not ABSOLUTE or RELATIVE\n");
-			exit(0);
-		case NOTHOMED:
-			printf("Motors not homed\n");
-			return;
-		default:
-			return;
+			return(BADAXIS);
 	}
 }
 
@@ -943,24 +961,22 @@ int errnum;
 
 	fieldCam()
 	
-	fieldCam retracts the Y1 cylinder to put Derek Kopon's wide field
-	camera into the beam ahead of the CCD.
+	fieldCam retracts the Y1 cylinder to put Derek Kopon's wide
+	field camera into the beam ahead of the CCD. Returns UNKNOWN
+	if the cylinder() routine does not detect the retract sensor.
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 int fieldCam()
 {
 
 	int status;
 
-	printf("field camera ");
-	fflush(stdout);
 	status = cylinder(Y1AXIS, RETRACT);
+
 	if (status != RETRACT) {
-		printf("error: Galil reports Y1AXIS motion error\n");
 		return(UNKNOWN);
 	} else {
-		printf("in\n");
-		fflush(stdout);
 		return(IN);
 	}
 
@@ -968,13 +984,15 @@ int fieldCam()
 
 /*-------------------------------------------------------------------
 
-	focus(type)
+	void focus(int type) (USER)
 	
-	focus sets the focus stage position. "type" may be either
-	FOCUSREL or FOCUSABS for relative or absolute motion, both
-	in motor steps (change this to mm when we get the focus motor
-	installed).
+	focus asks the user for a new focus position and sets the
+	focus stage position. "type" may be either FOCUSREL or
+	FOCUSABS for relative or absolute motions. Relative motions
+	are in motor steps, absolute motions are in thousandths of
+	an inch from the home position.
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 void focus(type)
 int type;
@@ -984,126 +1002,42 @@ int type;
 	long int x, currentFocus;
 
 	if (type == FOCUSREL) {
-		printf("Focus offset: ");
+		printf("focus offset (steps): ");
 		fflush(stdout);
 		x = atol(gets(buf));
+		focusRel(x);
+		return;
 	} else if (type == FOCUSABS) {
-		if (homeTime != askGalilForLong("MG homeTime")) {			// USE ISHOMED INSTEAD
-			errmsg(NOTHOMED);
+		if (!isHomed()) {
+			printf("not homed\n");
 			return;
 		}
-		printf("New focus value: ");
-		x = atol(gets(buf)) - askGalilForLong("RPC");
+		currentFocus = stepPosition(ZAXIS);
+		printf("New absolute focus value (mils): ");
+		x = atol(gets(buf));
+		x *= (int) ((float) ZSTEPSPERTURN / (1000.0 * (float) ZSCREWPITCH));
+		focusRel(-x - currentFocus);
+		return;
 	}
 
-	focusRel(x);
 
 }
 
 /*-------------------------------------------------------------------
 
-	focusRel(x)
+	void focusRel(long int z); (LIBRARY)
 	
 	focusRel moves the focus motor by x steps, positive or negative.
-	Re-do this after the focus motor is installed.
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
-void focusRel(x)
-long int x;
+void focusRel(z)
+long int z;
 {
 
-	char buf[80];
-	int i, keypress, motorState;
-
-	tellGalil("SP 0,0,1024");			// Focus motor speed
-	tellGalil("AC 1024,1024,256000");		// Acceleration
-	tellGalil("DC 1024,1024,256000");		// Deceleration
-
-	if (x == 0) {
-		printf("No motion\n");
-		return;
-	} else {
-		sprintf(buf, "PR 0,0,%ld", x);
-		tellGalil(buf);
-	}
-	tellGalil("SHC");				// Focus motor on
-	tellGalil("BGC");				// Focus motion only
-	i = 0;
-	setMode(NONBLOCKING);
-	while (!(keypress = getKey())) {
-		motorState = askGalilForInt("TSC");
-		if (((motorState>>7) & (0x01)) != 0) {		// Motor still moving
-			usleep(10000);
-			i++;
-		} else {
-			if (debugFlag) {
-				printf("%d loops in focus motion\n", i);
-			}
-			tellGalil("MOC");
-			return;
-		}
-	}
-
-	// Keyboard stop
-	printf("Focus motion stopped by user\n");
-	tellGalil("STC");
-	motorState = askGalilForInt("TSC");
-	while (((motorState>>7) & (0x01)) != 0) {
-		usleep(10000);
-		motorState = askGalilForInt("TSC");
-	}
-	tellGalil("MOC");
-	return;
+	moveOneAxis(ZAXIS, z, ZSPEED);
+	motorPower(ZAXIS, OFF);
 }
-
-/*-------------------------------------------------------------------
-
-	getLimits(axis)
-	
-	getLimits returns the state of the limit switches on the selected
-	axis. "axis" may be [XAXIS|YAXIS|ZAXIS].
-	
-	RETIRED; replaced by limitSwitch
-	
-int getLimits(axis)
-int axis;
-{
-
-	int motorState, forward, reverse;
-
-	forward = reverse = 0;
-	switch (axis) {
-		case XAXIS:
-			motorState = askGalilForInt("TSA");
-			break;
-		case YAXIS:
-			motorState = askGalilForInt("TSB");
-			break;
-		case ZAXIS:
-			motorState = askGalilForInt("TSC");
-			break;
-		default:
-			printf("getLimits() was passed illegal axis\n");
-			return(-1);
-	}
-
-	forward = ((motorState >> 3) & 0x01);
-	reverse = ((motorState >> 2) & 0x01);
-
-	if (forward == 0 && reverse == 0) {	// Neither switch active
-		return(0);
-	} else if (forward == 1 && reverse == 1) {
-		printf("getLimits() Error: both limit switches active\n");
-		return(-1);
-	} else if (reverse) {
-		return(reverse);
-	} else {
-		return(forward);
-	}
-}
--------------------------------------------------------------------*/
-
-
 
 
 /*-------------------------------------------------------------------
@@ -1112,6 +1046,7 @@ int axis;
 	
 	getKey returns a keyboard character hit (from stdin).
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 int getKey()
 {
@@ -1138,31 +1073,34 @@ int getKey()
 	
 	prints a list of commands. Coordinate with cmdLoop().
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
-int help()
+void help()
 {
 
 	printf("commands:\n\n");
+	printf("\ta - aperture, insert small\n");
+	printf("\tA - field lens, insert\n");
 	printf("\tB - Back off limits\n");
 	printf("\tC - Calibrate\n");
-	printf("\tD - Demo routine\n");
-	printf("\td - toggle diagnostic prints (debug)\n");
-	printf("\tF - Focus, absolute position\n");
+	printf("\td - debug flag toggle (diagnostic prints)\n");
+	printf("\tD - Demo mode\n");
 	printf("\tf - focus, relative motion\n");
-	printf("\tH - Home the axes\n");
+	printf("\tF - Focus, absolute position\n");
 	printf("\th - this help listing\n");
+	printf("\tH - Home the axes\n");
 	printf("\ti - initialize\n");
-	printf("\tl - led (i)n | (o)ut\n");
+	printf("\tl - led in or out (toggle)\n");
 	printf("\tm - move relative\n");
 	printf("\tM - Move absolute\n");
 	printf("\tq - quit\n");
 	printf("\tR - Reset Galil\n");
 	printf("\ts - Shack-Hartmann lenslets in\n");
+	printf("\tS - Self check\n");
 	printf("\tT - Test function execute\n");
 	printf("\tw - wide field camera in\n");
 	printf("\t? - print status\n");
 	printf("\t: - send commands directly to Galil\n");
-	printf("\t$ - fake homing (unplug limit switches and motor power first)\n");
 	fflush(stdout);
 
 }
@@ -1170,132 +1108,81 @@ int help()
 
 /*-------------------------------------------------------------------
 
-	fakeHome()
+	int fieldLens(void); (LIBRARY)
 	
-	Set up the controller and this software to believe that a homing
-	operation occurred. Used this for testing non-motion operations
-	that needed the system in a homed state.
+	fieldLens retracts the Y2 cylinder to put the field lens
+	into the CCD beam. The field lens alternates with the small
+	aperture.
 
-	RETIRED?
-
-void fakeHome()
-{
-
-	tellGalil("homeTime=TIME");
-	homeTime = askGalilForLong("MG homeTime");
-	tellGalil("CN-1");
-	tellGalil("DP 0,0,0");
-	if (debugFlag) {
-		printf("homeTime = %ld\n", homeTime);
-	}
-	printf("Faked a homing operation\n");
-
-}
--------------------------------------------------------------------*/
-
-
-/*-------------------------------------------------------------------
-
-	fieldLens()
-	
-	fieldLens retracts the Y2 cylinder to put the field lens into the
-	camera beam. The field lens alternates with the small aperture.
-
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 int fieldLens()
 {
 
 	int status;
 
-	printf("field lens ");
-	fflush(stdout);
 	status = cylinder(Y2AXIS, RETRACT);
 	if (status != RETRACT) {
-		printf("error: Galil reports field lens insertion (Y2AXIS) error\n");
 		return(UNKNOWN);
 	} else {
-		printf("field lens in\n");
-		fflush(stdout);
 		return(IN);
 	}
 }
 
 /*-------------------------------------------------------------------
 
-	homeAxes()
+	homeAxes() (LIBRARY)
 	
-	homeAxes drives the stage to the reverse limits, finds the last
-	point where the limit switch still allows motion, then moves
-	half a motor turn back from there to define the home position.
+	homeAxes drives the stage to the reverse limits, backs off
+	to a point point where the limit switch still allows motion,
+	then moves one motor turn back from there to define the home
+	position.
 	
 	The  motor positions are zeroed out and the X-Y encoder positions
 	are noted (they cannot be zeroed out).
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
-int homeAxes()
+void homeAxes()
 {
 
-	long int position;
-
 	if (limitSwitch(XAXIS) + limitSwitch(YAXIS) + limitSwitch(ZAXIS)) {
-		printf("homeAxes() on a limit already; backing off\n");
 		backOff();
 	}
 
-	printf("homing");
-	fflush(stdout);
-	creepToLimits(XAXIS, 15000, 1500);
-	printf(".");
-	fflush(stdout);
-	creepToLimits(YAXIS, 15000, 1500);
-	printf(".");
-	fflush(stdout);
-//	creepToLimits(ZAXIS, 15000, 500);
-	printf(".");
-	fflush(stdout);
-
-	moveOneAxis(XAXIS, -(LIMITHYSTER), 50);
+	creepToLimits(XAXIS, 25000, XYSPEED);
+	moveOneAxis(XAXIS, -50, XYSPEED/2);
+	while (isMoving(XAXIS)) {
+		}
+	creepToLimits(XAXIS, -5, XYSPEED/2);
+	moveOneAxis(XAXIS, -XSTEPSPERTURN, XYSPEED/2);
 	motorPower(XAXIS, OFF);
-	moveOneAxis(YAXIS, -(LIMITHYSTER), 50);
+
+	creepToLimits(YAXIS, 25000, XYSPEED);
+	moveOneAxis(YAXIS, -50, XYSPEED/2);
+	while (isMoving(YAXIS)) {
+		}
+	creepToLimits(YAXIS, -5, XYSPEED/2);
+	moveOneAxis(YAXIS, -YSTEPSPERTURN, XYSPEED/2);
 	motorPower(YAXIS, OFF);
-//	moveOneAxis(ZAXIS, -(LIMITHYSTER), 20);
-//	motorPower(ZAXIS, OFF);
-	printf(".");
-	fflush(stdout);
 
-	if (limitSwitch(XAXIS) == 0) {
-		printf("homeAxes() error in X hysteresis value\n");
-		return(UNKNOWN);
-	}
-	creepToLimits(XAXIS, -1, 20); 
+	creepToLimits(ZAXIS, 25000, ZSPEED);
+	moveOneAxis(ZAXIS, -1000, ZSPEED/2);
+	while (isMoving(ZAXIS)) {
+		}
+	creepToLimits(ZAXIS, -10, ZSPEED/2);
+	moveOneAxis(ZAXIS, -ZSTEPSPERTURN, ZSPEED/2);
+	motorPower(ZAXIS, OFF);
 
-	if (limitSwitch(YAXIS) == 0) {
-		printf("homeAxes() error in Y hysteresis value\n");
-		return(UNKNOWN);
-	}
-	creepToLimits(YAXIS, -1, 20);
-
-	if (limitSwitch(ZAXIS) == 0) {
-//		printf("homeAxes() error in Z hysteresis value\n");
-//		return(UNKNOWN);
-	}
-//	creepToLimits(ZAXIS, -1, 20);
-
-	moveOneAxis(XAXIS, -250, 1500);		// half-turn more
-	motorPower(XAXIS, OFF);
-	moveOneAxis(YAXIS, -250, 1500);
-	motorPower(YAXIS, OFF);
-	tellGalil("DP 0,0,0");
-	xEncOffset = askGalilForLong("TPA");
+	tellGalil("DP 0,0,0");			// zero out the steppers
+	xEncOffset = askGalilForLong("TPA");	// Save global variables
 	yEncOffset = askGalilForLong("TPB");
+
 	tellGalil("homeTime=TIME");
 	homeTime = askGalilForLong("MG homeTime");
 	if (debugFlag) {
 		printf("homeTime = %ld", homeTime);
 	}
-	printf(".done\n");
-	fflush(stdout);
-
 }
 
 /*-------------------------------------------------------------------
@@ -1305,42 +1192,45 @@ int homeAxes()
 	initGuider sets up the guider so the pneumatic actuators are
 	all retracted, motor brakes are turned on, and various Galil
 	parameters are set to reasonable values.
-	
 
-
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 void initGuider()
 {
 
-	printf("initializing ");
-	fflush(stdout);
-	brake(XAXIS, ON);
-	brake(YAXIS, ON);
-	tellGalil("MT 2,2,2");					// Tell Galil they're stepper motors
-	motorPower(XAXIS, OFF);
+	tellGalil("MT -2,-2,-2");		// Tell Galil they're stepper motors
+	motorPower(XAXIS, OFF);			// Power down the motors
 	motorPower(YAXIS, OFF);
 	motorPower(ZAXIS, OFF);
-	tellGalil("CB4");						// LED off (CHANGE TO USE LED COMMAND HERE)
-	tellGalil("CN1");						// Limit switch configuration (or is it -1?)
+	ledInOut(OUT);
+	tellGalil("CN1");			// Limit switch configuration
 
 	cylinder(Y1AXIS, RETRACT);
 	cylinder(Y2AXIS, RETRACT);
 	cylinder(SAXIS, RETRACT);
 
-	tellGalil("SP 200,200,200");			// Slow speed
-	tellGalil("AC 256000,256000,256000");	// These are defaults
+	tellGalil("SP 200,200,1000");		// Slow speed
+	tellGalil("AC 256000,256000,256000");	// These are defaults from Galil
 	tellGalil("DC 256000,256000,256000");
 	tellGalil("SD 256000,256000,256000");	// Deceleration after hitting a limit switch
-	tellGalil("VS 200");					// Slow vector speed
-	tellGalil("VA 256000");					// Default vector values
+	tellGalil("VS 200");			// Slow vector speed
+	tellGalil("VA 256000");			// Default vector values
 	tellGalil("VD 256000");
-	tellGalil("KS 5,5,5");					// Step motor smoothing
-	tellGalil("CAS");						// S coordinate system for vector motion
-	printf("done\n");
+	tellGalil("KS 3,3,3");			// Step motor smoothing (not too sensitive)
+	tellGalil("CAS");			// S coordinate system for vector motion
 
 }
 
+/*-------------------------------------------------------------------
 
+	int isHomed() (LIBRARY)
+	
+	Returns 1 if the guider was homed, 0 if not.
+
+	PROBABLY WANT TO REPLACE THIS WITH "CALIBRATED?"
+
+Checked 2012-04-26
+-------------------------------------------------------------------*/
 int isHomed()
 {
 
@@ -1351,11 +1241,21 @@ int isHomed()
 	}
 }
 
+/*-------------------------------------------------------------------
+
+	int isMoving(axis)
+	
+	axis is one of XAXIS, YAXIS, or ZAXIS.  Returns 1 if the
+	axis is moving, 0 if not, BADAXIS if called incorrectly
+
+Checked 2012-04-26
+-------------------------------------------------------------------*/
 int isMoving(axis)
+int axis;
 {
 
 	int status;
-	char buf[20];
+	char buf[10];
 
 	switch(axis) {
 		case XAXIS:
@@ -1368,83 +1268,114 @@ int isMoving(axis)
 			strcpy(buf, "TSC");
 			break;
 		default:
-			printf("isMoving(%d) error: passed bad axis value\n", axis);
-			return(UNKNOWN);
+			return(BADAXIS);
 	}
 	status = askGalilForInt(buf);
 	return((status>>7) & 0x01);
+
 }
 
+/*-------------------------------------------------------------------
+
+	int led(onOffStatus) (LIBRARY)
+	
+	Turns the led on or off, or asks for status. onOffStatus
+	should be one of ON, OFF, or STATUS. This function returns
+	one of ON, OFF, or UNKNOWN. UNKNOWN is returned if the
+	Galil controller returns an inconsistent answer or if you
+	called the routine with something other than ON, OFF, or
+	STATUS.
+
+Checked 2012-04-26
+-------------------------------------------------------------------*/
 int led(onOffStatus)
 {
 
-	static int status = UNKNOWN;
+	static int status;
 
 	switch (onOffStatus) {
 		case ON:
 			tellGalil("SB4");
 			if (askGalilForInt("MG@OUT[4]") == 0) {
-				printf("led() requested ON, Galil reports OFF\n");
-				return(UNKNOWN);
+				status = UNKNOWN;
 			} else {
 				status = ON;
-				return(ON);
 			}
+			break;
+
 		case OFF:
 			tellGalil("CB4");
 			if (askGalilForInt("MG@OUT[4]") != 0) {
-				printf("Led() requested off, Galil reports ON\n");
-				return(UNKNOWN);
+				status = UNKNOWN;
 			} else {
 				status = OFF;
-				return(OFF);
 			}
+			break;
+
 		case STATUS:
 			if (askGalilForInt("MG@OUT[4]") == 0) {
-				return(OFF);
+				status = OFF;
 			} else {
-				return(ON);
+				status = ON;
 			}
+			break;
+
 		default:
-			printf("led(%d) bad onOffStatus value\n", onOffStatus);
 			status = UNKNOWN;
-			return(UNKNOWN);
 	}
+	return(status);
 }
 
-int ledInOut()
+/*-------------------------------------------------------------------
+
+	int ledInOut(inOutStatus) (LIBRARY)
+	
+	Turns the led on or off, or asks for status. inOutStatus
+	is one of IN, OUT, or STATUS. This function returns one
+	of IN, OUT, UNKNOWN.
+
+Checked 2012-04-29
+-------------------------------------------------------------------*/
+int ledInOut(inOutStatus)
+int inOutStatus;
 {
 
-	int cmd;
+	static int status = UNKNOWN;
 
-	printf("led (i=in, o=out): ");
-	fflush(stdout);
-	setMode(NONBLOCKING);
-	while (!(cmd = getKey())) {
-		usleep(10000);
-	}
-	cmd = tolower(cmd);
-
-	if (cmd == 'i') {
-		cylinder(SAXIS, EXTEND);	// LED into the beam
-		led(ON);
-		printf("led in and on\n");
-		fflush(stdout);
-		return(1);
-	} else if (cmd == 'o') {
+	if (inOutStatus == IN) {
+		if (cylinder(SAXIS, EXTEND) == EXTEND) {
+			led(ON);
+			status = IN;
+		} else {
+			status = UNKNOWN;
+		}
+	} else if (inOutStatus == OUT) {
 		led(OFF);
-		cylinder(SAXIS, RETRACT);	// LED into the beam
-		printf("led out and off\n");
-		fflush(stdout);
-		return (1);
-	} else {
-		printf("ledInOut() bad choice; try again\n");
-		return (0);
+		if (cylinder(SAXIS, RETRACT) == RETRACT) {
+			status = OUT;
+		} else {
+			status = UNKNOWN;
+		}
 	}
+	return(status);
 
 }
 
+/*-------------------------------------------------------------------
+
+	int motorPower(int axis, int onOffStatus) (LIBRARY)
+	
+	Controls power to the motors. axis is XAXIS, YAXIS, or ZAXIS.
+	onOffStatus is one of ON, OFF, or STATUS.
+
+	This routine returns ON, OFF, BADAXIS (if you supplied an
+	incorrect axis value), and UNKNOWN if you supplied an 
+	inccorrect onOffStatus value.
+
+Checked 2012-04-26
+-------------------------------------------------------------------*/
 int motorPower(axis, onOffStatus)
+int axis, onOffStatus;
 {
 
 	char buf[20], axischar;
@@ -1464,21 +1395,26 @@ int motorPower(axis, onOffStatus)
 			break;
 
 		default:
-			printf("motorPower(%d, %d) passed a bad axis value\n", axis, onOffStatus);
-			return(UNKNOWN);
+			return(BADAXIS);
 	}	
 
 	if (onOffStatus == ON) {
 		sprintf(buf, "SH%c", axischar);
 		tellGalil(buf);
 		if (axis != ZAXIS) {
+			usleep(250000);
 			brake(axis, OFF);
+			usleep(250000);
 		}
 		return(ON);
 
 	} else if (onOffStatus == OFF) {
+		while (isMoving(axis)) {
+			}
 		if (axis != ZAXIS) {
+			usleep(250000);
 			brake(axis, ON);
+			usleep(250000);
 		}
 		sprintf(buf, "MO%c", axischar);
 		tellGalil(buf);
@@ -1493,18 +1429,19 @@ int motorPower(axis, onOffStatus)
 		}
 
 	} else {
-		printf("motorPower(AXIS, %d) passed a bad onOffStatus value\n", onOffStatus);
+		return(UNKNOWN);
 	}
+
 }
 
 
 /*-------------------------------------------------------------------
 
-	move(type)
+	move(type) (USER)
 
-	Moves the X-Y stage. type is [ABSOLUTE|RELATIVE]. For
+	Moves the X-Y stage. type is ABSOLUTE or RELATIVE. For
 	absolute moves, the user is requested for the position in
-	mm.
+	inches. Relative moves are in motor steps.
 
 -------------------------------------------------------------------*/
 void move(type)
@@ -1512,31 +1449,23 @@ int type;
 {
 
 	char buf[80];
-	long int x, y, currentX, currentY, xoff, yoff;
+	long int xoff, yoff;
+	float x, y;
 
 	if (type == ABSOLUTE) {
 		if (!isHomed()) {
-			errmsg(NOTHOMED);
+			printf("Not homed\n");
 			return;
 		}
-/*
-		currentX = stepPosition(XAXIS);
-		currentY = stepPosition(YAXIS);
-*/
 		printf("Absolute postion X-Y move\n");
-		printf("New X position (mm): ");
+		printf("New X position (inches): ");
 		fflush(stdout);
 		x = atof(gets(buf));
-		printf("New Y position (mm): ");
+		printf("New Y position (inches): ");
 		fflush(stdout);
 		y = atof(gets(buf));
-		moveAbs(x,y);
+		moveAbs(x, y);
 		return;
-/*
-		// Linear interpolation works only for offsets; compute offsets
-		xoff = x - currentX;
-		yoff = y - currentY;
-*/
 
 	} else if (type == RELATIVE) {
 		printf("Relative position X-Y move\n");
@@ -1556,59 +1485,54 @@ int type;
 		moveRel(xoff,yoff);
 		return;
 	} else {
-		errmsg(BADMOVE);
+		printf("move(%d) type not ABSOLUTE or RELATIVE\n", type);
 	}
 }
 
 /*-------------------------------------------------------------------
 
-	moveAbs(x,y)
+	int moveAbs(float, float) (LIBRARY)
 
 	moveAbs positions the guider stage at coordinates (x,y) where
-	x and y are in mm.
+	x and y are in inches.
 
 	The coordinates are positive numbers referenced to the
 	upper right hand corner of the guider patrol space (the
 	home position).
 
+	A calibrate() operation must be done before this command.
 
-	A Calibrate operation must be done before this command.
-
+Minor changes; check it 2012-04-26
 -------------------------------------------------------------------*/
-void moveAbs(x, y)
+int moveAbs(x, y)
 float x, y;
 {
 
 	long xEncOld, yEncOld, xEncNew, yEncNew, xSteps, ySteps, temp;
 	float xPulsPerStep, yPulsPerStep;
 
-	printf("x,y (mm) = %7.3f %7.3f\n", x, y);
-
 	xPulsPerStep = (float) XENCPULSPERTURN / (float) XSTEPSPERTURN;
 	yPulsPerStep = (float) YENCPULSPERTURN / (float) YSTEPSPERTURN;
 
-	// current encoder position
+	// save current encoder position
 	xEncOld = encPosition(XAXIS);
 	yEncOld = encPosition(YAXIS);
 
-	if (debugFlag) {
-		printf("Current encoder positions %d %d\n", xEncOld, yEncOld);
-	}
-
-	// target encoder position
+	// compute target encoder position
 	xEncNew = xEncOffset - (long int) (x * ((float) XENCPULSPERTURN)/XSCREWPITCH);
-	yEncNew = yEncOffset - (long int) (y * ((float) XENCPULSPERTURN)/XSCREWPITCH);
+	yEncNew = yEncOffset - (long int) (y * ((float) YENCPULSPERTURN)/YSCREWPITCH);
 
-	if (debugFlag) {
-		printf("New encoder positions %d %d\n", xEncNew, yEncNew);
-	}
 	if ((xEncNew > xEncOffset) || (xEncNew < xEncMin)) {
-		printf("xEncNew out of range (%ld)\n", xEncNew);
-		return;
+		if (debugFlag) {
+			printf("xEncNew out of range (%ld)\n", yEncNew);
+		}
+		return(0);
 	}
 	if ((yEncNew > yEncOffset) || (yEncNew < yEncMin)) {
-		printf("yEncNew out of range (%ld)\n", yEncNew);
-		return;
+		if (debugFlag) {
+			printf("yEncNew out of range (%ld)\n", yEncNew);
+		}
+		return(0);
 	}
 
 	// compute motor steps
@@ -1617,16 +1541,14 @@ float x, y;
 	temp = (yEncNew - yEncOld);
 	ySteps = (temp >= 0) ? (long int) (((double) (temp + 0.5)) / yPulsPerStep) : (long int) (((double) (temp - 0.5)) / yPulsPerStep);
 
-	printf("Motor steps %d %d\n", xSteps, ySteps);
-	fflush(stdout);
-
 	moveRel(xSteps, ySteps);
+	return(1);
 
 }
 
 /*-------------------------------------------------------------------
 
-	moveOneAxis(axis,steps,speed)
+	void moveOneAxis(int, int, int) (LIBRARY)
 
 	moveOneAxis commands a single-axis motion with the selected
 	number of motor steps and speed. Acceleration and deceleration
@@ -1635,19 +1557,21 @@ float x, y;
 	IMPORTANT NOTE: moveOneAxis turns on the motor power and
 	releases the brakes (if any) but does not turn off the motor
 	or set the brakes. This must be done after with a call to
-	motorPower(axis, onOffStatus).
+	motorPower(axis, onOffStatus), which waits for motion to
+	stop, then turns on the brake (if any) and turns off the
+	motor.
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
-int moveOneAxis(axis, steps, speed)
+void moveOneAxis(axis, steps, speed)
 int axis, steps, speed;
 {
 
 	char axischar, buf[20];
-	int testVal;
 	long int acceleration, deceleration;
 
-	acceleration = DEFACCEL;
-	deceleration = DEFDECEL;
+	acceleration = XYACCEL;
+	deceleration = XYDECEL;
 
 	switch (axis) {
 		case XAXIS:
@@ -1662,12 +1586,13 @@ int axis, steps, speed;
 
 		case ZAXIS:
 			axischar = 'C';
+			acceleration = ZACCEL;
+			deceleration = ZDECEL;
 			motorPower(ZAXIS, ON);
 			break;
 
 		default:
-			printf("moveOneAxis(%d,%d,%d) received an illegal axis\n", axis, steps, speed);
-			return(-1);
+			return;
 	}
 
 	sprintf(buf, "SP%c=%d", axischar, speed);
@@ -1680,164 +1605,53 @@ int axis, steps, speed;
 	tellGalil(buf);
 	sprintf(buf, "BG%c", axischar);
 	tellGalil(buf);
-	while (isMoving(axis)) {
-		usleep(10000);
-	}
-/* DOn't do this here (not symetric, but allows small motions without brakes
-	switch (axis) {
-		case XAXIS:
-			brake(XAXIS, ON);
-			motorPower(XAXIS, OFF);
-			break;
-		case YAXIS:
-			brake(YAXIS, ON);
-			motorPower(YAXIS, OFF);
-			break;
-		case ZAXIS:
-			motorPower(ZAXIS, OFF);
-			break;
-	}
-	
-*/
-}
 
-void moveRel(x, y)
-long int x, y;
-{
-
-	char buf[80];
-	int i, keypress, motorState;
-	long int acceleration, deceleration, speed;
-
-	if (x == 0 && y == 0) {
-		printf("No motion\n");
-		return;
-	}
-	acceleration = DEFACCEL;
-	deceleration = DEFDECEL;
-	speed = DEFSPEED;
-
-	sprintf(buf, "ACA=%d", acceleration);
-	tellGalil(buf);
-	sprintf(buf, "DCA=%d", deceleration);
-	tellGalil(buf);
-	sprintf(buf, "ACB=%d", acceleration);
-	tellGalil(buf);
-	sprintf(buf, "DCB=%d", deceleration);
-	tellGalil(buf);
-	sprintf(buf, "SPA=%d", speed);
-	tellGalil(buf);
-	sprintf(buf, "SPB=%d", speed);
-	tellGalil(buf);
-	sprintf(buf, "PRA=%d", x);
-	tellGalil(buf);
-	sprintf(buf, "PRB=%d", y);
-	tellGalil(buf);
-	motorPower(XAXIS, ON);
-	motorPower(YAXIS, ON);
-	tellGalil("BGA");
-	tellGalil("BGB");
-
-	while (isMoving(XAXIS) || isMoving(YAXIS)) {
-		setMode(NONBLOCKING);
-		if (getKey()) {
-			// Keyboard stop
-			printf("Motion stopped by user\n");
-			tellGalil("STA");
-			tellGalil("STB");
-			usleep(50000);
-			motorPower(XAXIS, OFF);
-			motorPower(YAXIS, OFF);
-			return;
-		} else {
-			usleep(10000);
-		}
-	}
-	motorPower(XAXIS, OFF);
-	motorPower(YAXIS, OFF);
-	return;
 }
 
 /*-------------------------------------------------------------------
 
-	moveRel(X,y)
+	void moveRel(long int, long int) (LIBRARY)
 
-	moveRel moves the X-Y stage by x and y relative motor steps.
+	Moves the X-Y stage to the new position, relative motor
+	steps. This could be more elegant, but it works.
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
-void moveRelVector(x, y)
+void moveRel(x, y)
 long int x, y;
 {
 
-	char buf[80];
-	int i, keypress, motorState;
-
-	printf("Hit any key to stop motion\n");
-
-	tellGalil("VS 3000");			// Vector speed
-	tellGalil("VA 8500");			// Vector acceleration
-	tellGalil("VD 20000");			// Vector deceleration
-	motorPower(XAXIS, ON);			// Motors on
-	motorPower(YAXIS, ON);
-	brake(XAXIS, OFF);
-	brake(YAXIS, OFF);
-	tellGalil("LMXY");			// Linear interpolation motion
-	sprintf(buf, "LI %ld,%ld", x, y);	// Build vector command
-	tellGalil(buf);				// Send LI command
-	if (debugFlag) {
-		printf("sent to Galil: %s\n", buf);
+	if (x) {
+		moveOneAxis(XAXIS, x, XYSPEED);
 	}
-	tellGalil("LE");			// End the LM sequence
-	tellGalil("BGS");			// Begin motion sequence
-
-	i = 0;
-	setMode(NONBLOCKING);
-	while (!getKey()) {
-		motorState = askGalilForInt("TSA");
-		if ((motorState>>7) & (0x01)) {	// Motor still moving?
-			usleep(10000);
-			i++;
-		} else {
-			if (debugFlag) {
-				printf("%d loops in linear interpolation motion\n", i);
-			}
-			brake(XAXIS, ON);
-			brake(YAXIS, ON);
-			motorPower(XAXIS, OFF);
-			motorPower(YAXIS, OFF);
-			return;
-		}
+	if (y) {
+		moveOneAxis(YAXIS, y, XYSPEED);
 	}
-
-	// Keyboard stop
-	printf("Motion stopped by user\n");
-	tellGalil("STS");
-	motorState = askGalilForInt("TSA");
-	while ((motorState>>7) & (0x01)) {
-		usleep(10000);
-		motorState = askGalilForInt("TSA");
-	}
-	brake(XAXIS, ON);
-	brake(YAXIS, ON);
 	motorPower(XAXIS, OFF);
 	motorPower(YAXIS, OFF);
-	return;
-
 }
 
-/* Talk to the Galil directly */
+
+/*-------------------------------------------------------------------
+
+	void passthru() (USER)
+
+	Talk directly to the Galil controller.
+
+Checked 2012-04-26 (increased string sizes)
+-------------------------------------------------------------------*/
 void passthru()
 {
 
-	char cmd[80], buf[80];
+	char cmd[128], buf[128];
 
 	printf("Galil command\n:");
 	fflush(stdout);
 	gets(cmd);
-	askGalil(cmd, buf, 80);
+	askGalil(cmd, buf, 128);
 	printf("%s\n", buf);
 	if (buf[strlen(buf) - 1] == '?') {	// Error message from Galil?
-		askGalil("TC1", buf, 80);
+		askGalil("TC1", buf, 128);
 		printf("%s\n", buf);		// Print TC1 error message
 	}
 	fflush(stdout);
@@ -1846,64 +1660,59 @@ void passthru()
 
 /*-------------------------------------------------------------------
 
-	selfCheck()
+	int selfCheck() (USER)
 
 	selfCheck does a few sanity checks on the guider. It moves
 	the three pneumatic cyinders and notices if the GMR sensors
-	are appropriately triggered and it moves the X-Y axis motors
+	are correctly triggered and it moves the X-Y axis motors
 	to see if the axis encoders report position changes of about
 	the correct amount.
 
+Checked 2012-04-26
 -------------------------------------------------------------------*/
 int selfCheck()
 {
 
-	int i, testVal, retVal, motorState, a, b;
+	int i, testVal, retVal;
 	long int oldEnc;
 	float encScale;
-
-	printf("SelfCheck ");
-	fflush(stdout);
 
 	retVal = PASS;
 	for (i = 0; i < 2; i++) {
 		testVal = cylinder(Y1AXIS, EXTEND);
 		if (testVal != 1) {
-			printf("\nY1 Extend test returns %d (should be 1)\n", testVal);
 			retVal = FAIL;
 		} 
 		testVal = cylinder(Y1AXIS, RETRACT);
 		if (testVal != 0) {
-			printf("\nY1 Retract test returns %d (should be 0)\n", testVal);
 			retVal = FAIL;
 		}
 		testVal = cylinder(Y2AXIS, EXTEND);
 		if (testVal != 1) {
-			printf("\nY2 Extend test returns %d (should be 1)\n", testVal);
 			retVal = FAIL;
 		}
 		testVal = cylinder(Y2AXIS, RETRACT);
 		if (testVal != 0) {
-			printf("\nY2 Retract test returns %d (should be 0)\n", testVal);
 			retVal = FAIL;
 		}
 	}
 
 
 	if (limitSwitch(XAXIS) || limitSwitch(YAXIS)) {
-		printf("selfCheck() says limit switches active (motor cable unplugged?); no motion test\n");
+		printf("selfCheck() says limit switches active (motor cable unplugged?); no motion test");
+		fflush(stdout);
 	} else {
 		oldEnc = encPosition(XAXIS);
 		moveRel(500,0);
 		encScale = (float) (encPosition(XAXIS) - oldEnc) / 500.0;
-		if (fabs(encScale - 4.0) > 0.001) {
+		if (fabs(encScale - 4.0) > 0.01) {
 			printf("Fail X encoder scale (%7.5f)\n", encScale);
 			retVal = FAIL;
 		}
 		oldEnc = encPosition(YAXIS);
 		moveRel(0,500);
 		encScale = (float) (encPosition(YAXIS) - oldEnc) / 500.0;
-		if (fabs(encScale - 4.0) > 0.001) {
+		if (fabs(encScale - 4.0) > 0.01) {
 			printf("Fail Y encoder scale (%7.5f)\n", encScale);
 			retVal = FAIL;
 		}
@@ -1919,13 +1728,14 @@ int selfCheck()
 
 /*-------------------------------------------------------------------
 
-	setMode(mode)
+	setMode(mode) (USER)
 
 	setMode switches between ICANON and ~ICANON tty modes. This
 	is used for the command keys. mode is either NONBLOCKING
 	(for one-key command mode) or BLOCKING (for line oriented
 	input).
 
+Checked 2012-04-26
 -------------------------------------------------------------------*/
 void setMode(mode)
 int mode;
@@ -1950,73 +1760,81 @@ int mode;
 
 /*-------------------------------------------------------------------
 
-	resetGalil()
+	resetGalil() (LIBRARY)
 
-	resetGalil sends the RS command to the Galil. This should
-	reset the controller to its power-on state.
+	resetGalil sends the RS command to the Galil. This resets
+	the controller to its power-on state.
+	The Galil sends a character that's not a ':' or '?' so
+	the tellGalil() function will return an error message.
+	This is normal.
 
+Checked 2012-04-26
 -------------------------------------------------------------------*/
 void resetGalil()
 {
 
-	printf("RESET (error message is normal)\n");
 	tellGalil("RS");
 
 }
 
 /*-------------------------------------------------------------------
 
-	shCam()
+	int shCam(void) (LIBRARY)
 
 	shCam inserts the Shack-Hartmann lenslet array into the beam.
+	shCam inserts the Shack-Hartmann lenslet array into the
+	camera beam by extending the Y1 cylinder. It has the opposite
+	action of fieldCam().
 
+	On success, this function returns IN. Otherwise, it returns
+	what cylinder() reports.
+
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 int shCam()
 {
 
 	int status;
 
-	printf("shack-Hartmann lenslets ");
-	fflush(stdout);
 	status = cylinder(Y1AXIS, EXTEND);
-	if (status != EXTEND) {
-		printf("error: Galil reports Y1 insertion error\n");
-		return(UNKNOWN);
+	if (status == EXTEND) {
+		return(IN);
+	} else {
+		return(status);
 	}
-	printf("in\n");
-	fflush(stdout);
-	return(IN);
 
 }
 
 /*-------------------------------------------------------------------
 
-	smallAp()
+	int smallAp(void) (LIBRARY)
 
-	smallAp inserts the small aperture into the camera beam. It
-	is the opposite action of fieldLens().
+	smallAp inserts the small aperture into the camera beam by
+	extending the Y2 cylinder. It has the opposite action of
+	fieldLens().
 
+	On success, this function returns IN. Otherwise, it returns
+	what cylinder() reports.
+
+Checked 2012-04-30
 -------------------------------------------------------------------*/
 int smallAp()
 {
 
 	int status;
 
-	printf("small aperture ");
-	fflush(stdout);
 	status = cylinder(Y2AXIS, EXTEND);
-	if (status != EXTEND) {
-		printf("error: Galil reports small aperture insertion error\n");
-		return(UNKNOWN);
-	} else {
-		printf("in\n");
+	if (status == EXTEND) {
 		return(IN);
+	} else {
+		return(status);
 	}
+
 }
 
 /*-------------------------------------------------------------------
 
-	statusPrint()
+	void statusPrint(void) (USER)
 
 	statusPrint prints status information. Most values are
 	from direct queries to the Galil controller, although some
@@ -2026,9 +1844,7 @@ int smallAp()
 void statusPrint()
 {
 
-	int sensors, motorState;
-
-	printf("status:\n");
+	printf("Status:\n");
 	printf("homeTime (local, remote): %ld %ld\n", homeTime, askGalilForLong("MG homeTime"));
 
 	printf("motors homed? ");
@@ -2122,22 +1938,38 @@ void statusPrint()
 		printf("Neither active");
 	}
 	printf("\n");
+
+	printf("Z Limits: ");
+	if (limitSwitch(ZAXIS)) {
+		if (limitSwitch(ZAXIS) & 0x01) {
+			printf("Reverse ");
+		}
+		if ((limitSwitch(ZAXIS)>>1) & 0x01) {
+			printf("Forward ");
+		}
+	} else {
+		printf("Neither active");
+	}
+	printf("\n");
 }
 
 
 /*-------------------------------------------------------------------
 
-	stepPosition(axis)
+	stepPosition(axis) (LIBRARY)
 
 	stepPosition returns the motor step position of the selected
-	axis. Axis may be [XAXIS|YAXIS|ZAXIS].
+	axis. Axis may be XAXIS, YAXIS, or ZAXIS.
 
 	The Galil runs stepper motors open-loop so this number is
-	just a count of the number of steps and may not reflect the
-	true position if motor steps were lost. This number can be
-	reset with the Galil DP command, which is done on a homing
-	operation.
+	just a count of the number of steps accumulated and may not
+	reflect the true position if motor steps were lost. This
+	number can be reset with the Galil DP command, which is
+	done on a homing operation.
 
+	Returns the value of the axis position or BADAXIS.
+
+Checked 2012-04-26
 -------------------------------------------------------------------*/
 long int stepPosition(axis)
 int axis;
@@ -2145,340 +1977,120 @@ int axis;
 {
 
 	switch (axis) {
+
 		case XAXIS:
 			return(askGalilForLong("RPA"));
+
 		case YAXIS:
 			return(askGalilForLong("RPB"));
+
 		case ZAXIS:
 			return(askGalilForLong("RPC"));
+
 		default:
-			printf("stepPosition(%d) passed bad axis value\n", axis);
-			return(UNKNOWN);
+			return(BADAXIS);
 	}
 }
 	
 
 /*-------------------------------------------------------------------
 
-	tellGalil(cmd)
+	char *tellGalil(char *cmd) (LIBRARY)
 
-	Sends a command to the Galil controller. cmd is a NUL
+	Send a command to the Galil controller. cmd is a NUL
 	terminated string containing the Galil command. If the
-	Galil returns a '?' instead of a ':' then this function
-	prints the TC1 error message.
+	Galil returns a '?' instead of a ':' as the first character,
+	then this function returns a pointer to a string containing
+	the TC1 error message. If it returns neither a '?' or a ':'
+	then it returns an error message with the character showing.
+	Otherwise, it returns a pointer to a zero length string
+	(first byte is '\0').
 
+Checked 2012-04-30
 -------------------------------------------------------------------*/
-int tellGalil(cmd)
+char *tellGalil(cmd)
 char *cmd;
 {
 
-	char buf[80];
+	uint8_t code;
+	static char buf[512];
 
-	if (debugFlag) {
-		printf("tellGalil(%s)\n", cmd);
-	}
-	askGalil(cmd, buf, 80);
+	askGalil(cmd, buf, 512);
 	if (buf[0] == ':') {
-		return(1);
+		memset(buf, 0, 512);
+		return(buf);
 	} else if (buf[0] == '?') {
-		askGalil("TC1", buf, 80);
-		printf("?Error, TC1 says: %s\n", buf);
-		return(0);
+		askGalil("TC1", buf, 512);
+		return(buf);
 	} else {
-		printf("Unexpected response from Galil (hex=%x)\n", buf[0]);
-		return(0);
+		code = (uint8_t) buf[0];
+		sprintf(buf, "Unexpected response from Galil (first char = %X)\n", code);
+		return(buf);
 	}
 }
 
 /*-------------------------------------------------------------------
 
-	telnetToGalil(ipaddress)
+	int telnetToGalil(char *ipaddress) (LIBRARY)
 
 	Opens a socket to the Galil controller at ipaddress.
-	ipaddress is a pointer to a string containing the IP address
-	of the Galil controller. It returns the file descriptor
-	of the socket or prints an error message.
+	ipaddress is a pointer to a string containing the IP
+	address of the Galil controller (e.g. "192.168.1.2").
+	It returns the file descriptor of the socket or prints
+	an error code.
 
 	The ipaddress string must be an IPv4 quartet, not a host name
-	(e.g., 192.168.1.2).
+	(e.g., "192.168.1.2").
 
+	The Galil controller doesn't care about port numbers.
+	This routine uses the #define GALILPORT value. The standard
+	telnet port is 23 (this is often blocked by routers) and
+	the standard Modbus port is 502. You should probably not
+	use the Modbus port number even if you know you're not going
+	to ask the Galil to communicate on Modbus.
+
+	If telnetToGalil can't open a socket, it returns one of
+	the following:
+
+	-1 inet_pton() failed.
+	-2 socket() failed.
+	-3 connect() failed.
+
+Checked 2012-04-26
 -------------------------------------------------------------------*/
 int telnetToGalil(ipaddress)
 char *ipaddress;
 {
 
-	char buf[80];
+	char buf[256];
 	int i, fd;
 	struct sockaddr_in sockGalil;
 
 	memset(buf, 0, 80);
 	memset((char *) &sockGalil, 0, sizeof(sockGalil));
 	sockGalil.sin_family = AF_INET;
-	sockGalil.sin_port = htons(8079);	// Galil is OK with this port (behaves like telnet)
+	sockGalil.sin_port = htons(GALILPORT);
 	if (inet_pton(AF_INET, ipaddress, &(sockGalil.sin_addr)) <= 0) {
-		errmsg(INETPTONERROR);
+		return(-1);
 	}
 
 	if ((fd = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
-		errmsg(SOCKETERROR);
+		return(-2);
 	}
 
 	if (connect(fd, (struct sockaddr *) &sockGalil, sizeof(sockGalil))) {
-		errmsg(CONNECTERROR);
-	} else {
-		printf("connected to %s\n", ipaddress);
-		fflush(stdout);
+		return(-3);
 	}
 
 	// Clear the Galil output buffer (it's always been empty when I've looked)
 	i = write(fd, "\r", 1);
 	i = read(fd, buf, 255);
-	if (buf[0] != ':') {
-		printf("Galil response to <cr> was '%c'\n", buf[0]);
-		fflush(stdout);
-	}
-
 	return(fd);
-
-}
-
-
-void testFunction1()
-{
-
-
-	int i, status;
-
-	printf("\n");
-
-
-
-	moveOneAxis(YAXIS, -200, 1024);
-/*
-
-	status = led(ON);
-	printf("LED on?\n");
-	sleep(2);
-	status = led(OFF);
-	printf("LED off?\n");
-	sleep(2);
-	status = led(STATUS);
-	printf("led() reports for status %d\n", status);
-
-
-	status = motorPower(XAXIS,STATUS);
-	if (status == OFF) {
-		printf("motorPower reports xmotor power OFF\n");
-	} else if (status == ON) {
-		printf("motorPower reports xmotor power ON\n");
-	}
-	status = askGalilForInt("TSA");
-	printf("galil reports %d\n", ((status>>5) & 0x01));
-
-	status = motorPower(YAXIS,STATUS);
-	if (status == OFF) {
-		printf("motorPower reports ymotor power OFF\n");
-	} else if (status == ON) {
-		printf("motorPower reports ymotor power ON\n");
-	}
-	status = askGalilForInt("TSB");
-	printf("galil reports %d\n", ((status>>5) & 0x01));
-
-	status = motorPower(ZAXIS,STATUS);
-	if (status == OFF) {
-		printf("motorPower reports zmotor power OFF\n");
-	} else if (status == ON) {
-		printf("motorPower reports zmotor power ON\n");
-	}
-	status = askGalilForInt("TSC");
-	printf("galil reports %d\n", ((status>>5) & 0x01));
-	
-
-	if (motorPower(XAXIS,ON) == ON) {
-		printf("motor x on\n");
-	} else {
-		printf("error\n");
-	}
-	if (motorPower(YAXIS,ON) == ON) {
-		printf("motor y on\n");
-	} else {
-		printf("y error\n");
-	}
-	if (motorPower(ZAXIS,ON) == ON) {
-		printf("motor z on\n");
-	} else {
-		printf("z error\n");
-	}
-/////////////
-	if (brake(XAXIS,STATUS) == ON) {
-		printf("brake routine claims x is ON\n");
-	} else if (brake(XAXIS,STATUS) == OFF) {
-		printf("brake routine claims x OFF\n");
-	} else {
-		printf("brake routine error\n");
-	}
-	if (brake(YAXIS,STATUS) == ON) {
-		printf("brake routine claims y is ON\n");
-	} else if (brake(YAXIS,STATUS) == OFF) {
-		printf("brake routine claims y OFF\n");
-	} else {
-		printf("brake routine error\n");
-	}
-
-	status = ~askGalilForInt("TI0");
-	for (i = 2; i < 6; i++) {
-		printf("%d bit is %d\n", i, ((status>>i) & 0x01));
-
-	}
-
-	sleep(1);
-	printf("Y1 Status returns %d (should be 0)\n", cylinder(Y1AXIS,STATUS));
-	sleep(1);
-	printf("Y2 Status returns %d (should be 0)\n", cylinder(Y2AXIS,STATUS));
-	sleep(1);
-	printf("S Status returns %d (should be 0)\n", cylinder(SAXIS,STATUS));
-	sleep(1);
-	printf("Y1 Extend returns %d (should be 1)\n", cylinder(Y1AXIS,EXTEND));
-	sleep(1);
-	printf("Y1 Retract returns %d (should be 0)\n", cylinder(Y1AXIS,RETRACT));
-	sleep(1);
-	printf("Y2 Extend returns %d (should be 1)\n", cylinder(Y2AXIS,EXTEND));
-	sleep(1);
-	printf("Y2 Retract returns %d (should be 0)\n", cylinder(Y2AXIS,RETRACT));
-	sleep(1);
-	printf("S Extend returns %d (should be 1)\n", cylinder(SAXIS,EXTEND));
-	sleep(1);
-	printf("S Retract returns %d (should be 0)\n", cylinder(SAXIS,RETRACT));
-//UNKNOWN
-	sleep(1);
-	printf("brake status:\n");
-	printf("brake X = %d Y = %d Z = %d\n", brake(XAXIS, STATUS), brake(YAXIS, STATUS), brake(ZAXIS, STATUS));
-
-//X-OFF
-	sleep(1);
-	printf("xbrake off\n");
-	brake(XAXIS, OFF);
-	sleep(1);
-	printf("brake X = %d Y = %d\n", brake(XAXIS, STATUS), brake(YAXIS, STATUS));
-
-//Y-OFF
-	sleep(1);
-	printf("ybrake off\n");
-	brake(YAXIS, OFF);
-	sleep(1);
-	printf("brake X = %d Y = %d\n", brake(XAXIS, STATUS), brake(YAXIS, STATUS));
-
-//X-ON
-	sleep(1);
-	printf("xbrake on\n");
-	brake(XAXIS, ON);
-	sleep(1);
-	printf("brake X = %d Y = %d\n", brake(XAXIS, STATUS), brake(YAXIS, STATUS));
-
-
-//Y-ON
-	sleep(1);
-	printf("ybrake on\n");
-	brake(YAXIS, ON);
-	sleep(1);
-	printf("brake X = %d Y = %d\n", brake(XAXIS, STATUS), brake(YAXIS, STATUS));
-
-	sleep(1);
-	printf("both brakes off\n");
-	brake(YAXIS, OFF);
-	brake(XAXIS, OFF);
-	sleep(1);
-	printf("brake X = %d Y = %d\n", brake(XAXIS, STATUS), brake(YAXIS, STATUS));
-*/
-}
-
-void testFunction2()
-
-{
-
-	int lim, forward, reverse;
-
-	lim = limitSwitch(XAXIS);
-	forward = reverse = 0;
-	if (lim & 0x01) {
-		reverse = 1;
-	}
-	if ((lim>>1) & 0x01) {
-		forward = 1;
-	}
-	printf("X limits: Rev=%d, For=%d\n", reverse, forward);
-
-	lim = limitSwitch(YAXIS);
-	forward = reverse = 0;
-	if (lim & 0x01) {
-		reverse = 1;
-	}
-	if ((lim>>1) & 0x01) {
-		forward = 1;
-	}
-	printf("Y limits: Rev=%d, For=%d\n", reverse, forward);
-
-	lim = limitSwitch(ZAXIS);
-	forward = reverse = 0;
-	if (lim & 0x01) {
-		reverse = 1;
-	}
-	if ((lim>>1) & 0x01) {
-		forward = 1;
-	}
-	printf("Z limits: Rev=%d, For=%d\n", reverse, forward);
-
-}
-
-void testFunction7()
-{
-
-
-	static int direction = 1;
-	moveOneAxis(YAXIS, 200*direction, DEFSPEED);
-	motorPower(YAXIS, OFF);
-	direction = -direction;
-
-}
-
-void testFunction4()
-
-{
-
-	creepToLimits(YAXIS, -5000, 500);
-
-}
-
-void testFunction5()
-{
-
-	printf("\n");
-	printf("X=%ld\n", stepPosition(XAXIS));
-	printf("Y=%ld\n", stepPosition(YAXIS));
-	printf("Z=%ld\n", stepPosition(ZAXIS));
-	printf("X=%ld\n", encPosition(XAXIS));
-	printf("Y=%ld\n", encPosition(YAXIS));
-
-
-}
-
-void testFunction6()
-{
-
-	backOff();
-
-}
-
-void testFunction8()
-{
-
-	creepToLimits(YAXIS, 1, 20);
 
 }
 
 void testFunction()
 {
 
-	moveAbs(50.0, 20.0);
 
 }
