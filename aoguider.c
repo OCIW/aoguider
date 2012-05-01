@@ -104,9 +104,9 @@ int	fieldLens(void);
 void	focus(int);
 void	focusRel(long int);
 int	getKey(void);
-//int	getLimits(int);
 void	help(void);
 void	homeAxes(void);
+float	inchPosition(int);
 void	initGuider(void);
 int	isHomed(void);
 int	isMoving(int);
@@ -117,7 +117,6 @@ void	move(int);
 int	moveAbs(float, float);
 void	moveOneAxis(int, int, int);
 void	moveRel(long int, long int);
-float	mmPosition(int);
 void	passthru(void);
 void	resetGalil(void);
 int	shCam(void);
@@ -139,6 +138,7 @@ long int xEncOffset, yEncOffset;	// Encoder values at home position
 long int xEncMin, yEncMin;		// Minimum legal encoder value
 float xEncPerStep, yEncPerStep;		// Encoder pulses per motor step
 
+/*=================================================================*/
 int main(argv, argc)
 int argv;
 char *argc[];
@@ -925,9 +925,9 @@ int axis;
 
 /*-------------------------------------------------------------------
 
-	mmPosition(axis)
+	inchPosition(axis)
 	
-	mmPosition returns the current X-Y position in inches away
+	inchPosition returns the current X-Y position in inches away
 	from the home position of the selected axis based on the
 	rotary encoders. "axis" may be either XAXIS or YAXIS. This
 	position is computed from the manufacturer's specs on the
@@ -941,7 +941,7 @@ int axis;
 
 Checked 2012-04-30
 -------------------------------------------------------------------*/
-float mmPosition(axis)
+float inchPosition(axis)
 int axis;
 {
 
@@ -1885,7 +1885,7 @@ void statusPrint()
 	printf("Encoder minvals: (X,Y) = (%ld, %ld)\n", xEncMin, yEncMin);
 
 	if (isCalibrated) {
-		printf("Stage position (x,y) %7.3f %7.3f (mm)\n", mmPosition(XAXIS), mmPosition(YAXIS));
+		printf("Stage position (x,y) %7.3f %7.3f (mm)\n", inchPosition(XAXIS), inchPosition(YAXIS));
 	}
 
 	// Print the sensor states
