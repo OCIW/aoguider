@@ -102,6 +102,7 @@ long int encPosition(int);
 int	fieldCam(void);
 int	fieldLens(void);
 void	focus(int);
+void	focusAbs(long int);
 void	focusRel(long int);
 int	getKey(void);
 void	help(void);
@@ -137,6 +138,7 @@ long int homeTime = -9999;		// Galil TIME that axes were homed
 long int xEncOffset, yEncOffset;	// Encoder values at home position
 long int xEncMin, yEncMin;		// Minimum legal encoder value
 float xEncPerStep, yEncPerStep;		// Encoder pulses per motor step
+float xMaxInches, yMaxInches, zMaxInches;
 
 /*=================================================================*/
 int main(argv, argc)
@@ -303,24 +305,24 @@ void backOff()
 
 	if ((testVal = limitSwitch(XAXIS))) {
 		if (testVal & 0x01) {
-			creepToLimits(XAXIS, 20, XYSPEED/4);
+			creepToLimits(XAXIS, 100, XYSPEED);
 		} else if (testVal & 0x02) {
-			creepToLimits(XAXIS, -20, XYSPEED/4);
+			creepToLimits(XAXIS, -100, XYSPEED);
 		}
 	}
 
 	if ((testVal = limitSwitch(YAXIS))) {
 		if (testVal & 0x01) {
-			creepToLimits(YAXIS, 20, XYSPEED/4);
+			creepToLimits(YAXIS, 100, XYSPEED);
 		} else if (testVal & 0x02) {
-			creepToLimits(YAXIS, -20, XYSPEED/4);
+			creepToLimits(YAXIS, -100, XYSPEED);
 		}
 	}
 	if ((testVal = limitSwitch(ZAXIS))) {
 		if (testVal & 0x01) {
-			creepToLimits(ZAXIS, 200, ZSPEED/4);
+			creepToLimits(ZAXIS, 200, ZSPEED);
 		} else if (testVal & 0x02) {
-			creepToLimits(ZAXIS, -200, ZSPEED/4);
+			creepToLimits(ZAXIS, -200, ZSPEED);
 		}
 	}
 
@@ -433,6 +435,14 @@ void calibrate()
 
 	homeAxes();
 
+	creepToLimits(ZAXIS, -25000, ZSPEED);
+	moveOneAxis(ZAXIS, 2500, ZSPEED);
+	creepToLimits(ZAXIS, 1000, ZSPEED);
+	moveOneAxis(ZAXIS, 4000, ZSPEED);
+	while (isMoving(ZAXIS)) {
+		}
+	zMaxInches = -inchPosition(ZAXIS);
+
 	// go to the reverse limit
 	creepToLimits(XAXIS, -25000, XYSPEED);
 	moveOneAxis(XAXIS, 150, XYSPEED/2);
@@ -457,6 +467,9 @@ void calibrate()
 	// Set global xEncMin, yEncMin
 	xEncMin = encPosition(XAXIS);
 	yEncMin = encPosition(YAXIS);
+
+	xMaxInches = inchPosition(XAXIS);
+	yMaxInches = inchPosition(YAXIS);
 
 	isCalibrated = 1;
 
@@ -616,7 +629,6 @@ int creepToLimits(axis, steps, speed)
 int axis, steps, speed;
 {
 
-	char axischar;
 	int i, oldLimits, maxLoops;
 
 	maxLoops = 200;
@@ -624,7 +636,6 @@ int axis, steps, speed;
 	switch (axis) {
 
 		case XAXIS:
-			axischar = 'A';
 			i = 0;
 			oldLimits = limitSwitch(XAXIS);
 			while (oldLimits == limitSwitch(XAXIS) && i < maxLoops) {	// wait until the switch changes state
@@ -637,7 +648,6 @@ int axis, steps, speed;
 			break;
 
 		case YAXIS:
-			axischar = 'B';
 			i = 0;
 			oldLimits = limitSwitch(YAXIS);
 			while (oldLimits == limitSwitch(YAXIS) && i < maxLoops) {
@@ -650,7 +660,6 @@ int axis, steps, speed;
 			break;
 
 		case ZAXIS:
-			axischar = 'C';
 			i = 0;
 			oldLimits = limitSwitch(ZAXIS);
 			while (oldLimits == limitSwitch(ZAXIS) && i < maxLoops) {
@@ -846,7 +855,7 @@ void debug()
 void demo()
 {
 
-	float x, y, z, randomNum;
+	float x, y, randomNum;
 
 	if (! isCalibrated) {
 		printf("Calibrate first\n");
@@ -854,9 +863,9 @@ void demo()
 	}
 
 	randomNum = (float) rand() / (float) RAND_MAX;
-	x = 250.0 * randomNum;
+	x = xMaxInches * randomNum;
 	randomNum = (float) rand() / (float) RAND_MAX;
-	y = 170.0 * randomNum;
+	y = yMaxInches * randomNum;
 	printf("Moving to %lf %lf\n", x, y);
 	moveAbs(x,y);
 
@@ -870,8 +879,6 @@ void demo()
 		cylinder(SAXIS, OUT);
 		printf("LED off and out\n");
 	}
-
-	focusRel(z);
 
 	randomNum = (float) rand() / (float) RAND_MAX;
 	if (randomNum > 0.5) {
@@ -952,6 +959,9 @@ int axis;
 		case YAXIS:
 			return((float) ((yEncOffset - encPosition(YAXIS)) * YSCREWPITCH) / (float) (YENCPULSPERTURN));
 
+		case ZAXIS:
+			return((float) stepPosition(ZAXIS) * 1.25e-5);
+
 		default:
 			return(BADAXIS);
 	}
@@ -1015,11 +1025,28 @@ int type;
 		currentFocus = stepPosition(ZAXIS);
 		printf("New absolute focus value (mils): ");
 		x = atol(gets(buf));
+/*
 		x *= (int) ((float) ZSTEPSPERTURN / (1000.0 * (float) ZSCREWPITCH));
 		focusRel(-x - currentFocus);
+*/
+		focusAbs(x);
 		return;
 	}
 
+}
+
+void focusAbs(z)
+long int z;
+{
+
+	long int currentFocus, focusSteps;
+
+	if (z < 0 || z > (long int) (1000.0 * zMaxInches)) {
+		return;
+	}
+	currentFocus = stepPosition(ZAXIS);
+	focusSteps = z * (long int) ((float) ZSTEPSPERTURN / (1000.0 * (float) ZSCREWPITCH));
+	focusRel(-focusSteps - currentFocus);
 
 }
 
@@ -1511,6 +1538,12 @@ float x, y;
 	long xEncOld, yEncOld, xEncNew, yEncNew, xSteps, ySteps, temp;
 	float xPulsPerStep, yPulsPerStep;
 
+	if (x > xMaxInches || x < 0.0) {
+		return(0);
+	}
+	if (y > yMaxInches || y < 0.0) {
+		return(0);
+	}
 	xPulsPerStep = (float) XENCPULSPERTURN / (float) XSTEPSPERTURN;
 	yPulsPerStep = (float) YENCPULSPERTURN / (float) YSTEPSPERTURN;
 
@@ -2092,5 +2125,9 @@ char *ipaddress;
 void testFunction()
 {
 
+
+	printf("xMaxInches = %f\n", xMaxInches);
+	printf("yMaxInches = %f\n", yMaxInches);
+	printf("zMaxInches = %f\n", zMaxInches);
 
 }
