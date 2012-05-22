@@ -1091,6 +1091,9 @@ void focusRel(z)
 long int z;
 {
 
+	if (limitSwitch(XAXIS) & 0x01) {
+		return;
+	}
 	moveOneAxis(ZAXIS, z, ZSPEED);
 	motorPower(ZAXIS, OFF);
 }
