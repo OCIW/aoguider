@@ -75,7 +75,7 @@
 #define ZSCREWPITCH	0.050
 
 //X and Y axis defaults
-#define XYSPEED		3800		// Speed
+#define XYSPEED		2000		// Speed
 #define XYACCEL		9000		// Acceleration
 #define XYDECEL		20000		// Deceleration
 #define XYLIMITHYSTER	150		// Limit switch hysteresis
@@ -83,6 +83,10 @@
 #define ZACCEL		128000
 #define ZDECEL		128000
 #define ZLIMITHYSTER	2700
+
+//Positions
+#define XCENTER		3.5
+#define YCENTER		7.5
 
 // Function prototypes
 void	backOff();
@@ -94,6 +98,7 @@ long int askGalilForLong(char *);
 int	limitSwitch(int);
 int	brake(int, int);
 void	calibrate(void);
+void	centerField(void);
 void	cmdLoop(void);
 int	creepToLimits(int, int, int);
 int	cylinder(int, int);
@@ -126,6 +131,7 @@ void	setMode(int);
 int	smallAp(void);
 void	statusPrint(void);
 long int stepPosition(int);
+void	stopMotors(void);
 char	*tellGalil(char *);
 int	telnetToGalil(char *);
 void	testFunction(void);
@@ -305,24 +311,24 @@ void backOff()
 
 	if ((testVal = limitSwitch(XAXIS))) {
 		if (testVal & 0x01) {
-			creepToLimits(XAXIS, 100, XYSPEED);
+			creepToLimits(XAXIS, 2000, XYSPEED);
 		} else if (testVal & 0x02) {
-			creepToLimits(XAXIS, -100, XYSPEED);
+			creepToLimits(XAXIS, -2000, XYSPEED);
 		}
 	}
 
 	if ((testVal = limitSwitch(YAXIS))) {
 		if (testVal & 0x01) {
-			creepToLimits(YAXIS, 100, XYSPEED);
+			creepToLimits(YAXIS, 2000, XYSPEED);
 		} else if (testVal & 0x02) {
-			creepToLimits(YAXIS, -100, XYSPEED);
+			creepToLimits(YAXIS, -2000, XYSPEED);
 		}
 	}
 	if ((testVal = limitSwitch(ZAXIS))) {
 		if (testVal & 0x01) {
-			creepToLimits(ZAXIS, 200, ZSPEED);
+			creepToLimits(ZAXIS, 2000, ZSPEED);
 		} else if (testVal & 0x02) {
-			creepToLimits(ZAXIS, -200, ZSPEED);
+			creepToLimits(ZAXIS, -2000, ZSPEED);
 		}
 	}
 
@@ -436,28 +442,34 @@ void calibrate()
 	homeAxes();
 
 	creepToLimits(ZAXIS, -25000, ZSPEED);
-	moveOneAxis(ZAXIS, 2500, ZSPEED);
-	creepToLimits(ZAXIS, 1000, ZSPEED);
+	moveOneAxis(ZAXIS, 1000, ZSPEED);
+	while (isMoving(ZAXIS)) {
+	}
+	creepToLimits(ZAXIS, 10, ZSPEED);
 	moveOneAxis(ZAXIS, 4000, ZSPEED);
 	while (isMoving(ZAXIS)) {
-		}
+	}
 	zMaxInches = -inchPosition(ZAXIS);
 
 	// go to the reverse limit
-	creepToLimits(XAXIS, -25000, XYSPEED);
+	creepToLimits(XAXIS, -65200, XYSPEED);
 	moveOneAxis(XAXIS, 150, XYSPEED/2);
 	while (isMoving(XAXIS)) {
-		}
+	}
 	creepToLimits(XAXIS, 5, XYSPEED/2);
 	moveOneAxis(XAXIS, XSTEPSPERTURN, XYSPEED/2);
+	while (isMoving(XAXIS)) {
+	}
 	motorPower(XAXIS, OFF);
 
-	creepToLimits(YAXIS, -25000, XYSPEED);
+	creepToLimits(YAXIS, -65200, XYSPEED);
 	moveOneAxis(YAXIS, 150, XYSPEED/2);
 	while (isMoving(YAXIS)) {
-		}
+	}
 	creepToLimits(YAXIS, 5, XYSPEED/2);
 	moveOneAxis(YAXIS, YSTEPSPERTURN, XYSPEED/2);
+	while (isMoving(YAXIS)) {
+	}
 	motorPower(YAXIS, OFF);
 
 	// Set global xEncPerStep, yEncPerStep
@@ -472,6 +484,15 @@ void calibrate()
 	yMaxInches = inchPosition(YAXIS);
 
 	isCalibrated = 1;
+
+	centerField();
+	focusAbs(500);
+}
+
+void centerField()
+{
+
+	moveAbs(XCENTER, YCENTER);
 
 }
 
@@ -511,6 +532,12 @@ void cmdLoop()
 		printf("Backoff limits");
 		fflush(stdout);
 		backOff();
+		printf(".\n");
+		fflush(stdout);
+	} else if (cmd == 'c') {	// center field
+		printf("center field");
+		fflush(stdout);
+		centerField();
 		printf(".\n");
 		fflush(stdout);
 	} else if (cmd == 'C') {	// Calibrate
@@ -641,7 +668,7 @@ int axis, steps, speed;
 			while (oldLimits == limitSwitch(XAXIS) && i < maxLoops) {	// wait until the switch changes state
 				moveOneAxis(XAXIS, steps, speed);
 				while (isMoving(XAXIS)) {
-					}
+				}
 				i++;
 			}
 			motorPower(XAXIS, OFF);
@@ -653,7 +680,7 @@ int axis, steps, speed;
 			while (oldLimits == limitSwitch(YAXIS) && i < maxLoops) {
 				moveOneAxis(YAXIS, steps, speed);
 				while (isMoving(YAXIS)) {
-					}
+				}
 				i++;
 			}
 			motorPower(YAXIS, OFF);
@@ -665,7 +692,7 @@ int axis, steps, speed;
 			while (oldLimits == limitSwitch(ZAXIS) && i < maxLoops) {
 				moveOneAxis(ZAXIS, steps, speed);
 				while (isMoving(ZAXIS)) {
-					}
+				}
 				i++;
 			}
 			motorPower(ZAXIS, OFF);
@@ -835,10 +862,12 @@ void debug()
 
 	if (debugFlag) {
 		debugFlag = 0;
-		printf("debug off\n");
+		printf(" off");
+		fflush(stdout);
 	} else {
 		debugFlag = 1;
-		printf("debug on\n");
+		printf(" on");
+		fflush(stdout);
 	}
 
 }
@@ -1177,28 +1206,40 @@ void homeAxes()
 		backOff();
 	}
 
-	creepToLimits(XAXIS, 25000, XYSPEED);
-	moveOneAxis(XAXIS, -50, XYSPEED/2);
+	creepToLimits(XAXIS, 65200, XYSPEED);	// hit the limit switch
+	moveOneAxis(XAXIS, -2000, XYSPEED);	// back off
 	while (isMoving(XAXIS)) {
-		}
+	}
+	moveOneAxis(XAXIS, 6000, XYSPEED/2);	// hit the limit switch again
+	while (isMoving(XAXIS)) {
+	}
 	creepToLimits(XAXIS, -5, XYSPEED/2);
-	moveOneAxis(XAXIS, -XSTEPSPERTURN, XYSPEED/2);
+	moveOneAxis(XAXIS, -XSTEPSPERTURN, XYSPEED/2);	// back off one turn
+	while (isMoving(XAXIS)) {
+	}
 	motorPower(XAXIS, OFF);
 
-	creepToLimits(YAXIS, 25000, XYSPEED);
-	moveOneAxis(YAXIS, -50, XYSPEED/2);
+	creepToLimits(YAXIS, 65200, XYSPEED);
+	moveOneAxis(YAXIS, -2000, XYSPEED);
 	while (isMoving(YAXIS)) {
-		}
+	}
+	moveOneAxis(YAXIS, 6000, XYSPEED/2);
+	while (isMoving(YAXIS)) {
+	}
 	creepToLimits(YAXIS, -5, XYSPEED/2);
 	moveOneAxis(YAXIS, -YSTEPSPERTURN, XYSPEED/2);
+	while (isMoving(YAXIS)) {
+	}
 	motorPower(YAXIS, OFF);
 
 	creepToLimits(ZAXIS, 25000, ZSPEED);
-	moveOneAxis(ZAXIS, -1000, ZSPEED/2);
+	moveOneAxis(ZAXIS, -1000, ZSPEED);
 	while (isMoving(ZAXIS)) {
-		}
+	}
 	creepToLimits(ZAXIS, -10, ZSPEED/2);
 	moveOneAxis(ZAXIS, -ZSTEPSPERTURN, ZSPEED/2);
+	while (isMoving(ZAXIS)) {
+	}
 	motorPower(ZAXIS, OFF);
 
 	tellGalil("DP 0,0,0");			// zero out the steppers
@@ -1225,6 +1266,9 @@ Checked 2012-04-30
 void initGuider()
 {
 
+
+//	resetGalil();
+	stopMotors();
 	tellGalil("MT -2,-2,-2");		// Tell Galil they're stepper motors
 	motorPower(XAXIS, OFF);			// Power down the motors
 	motorPower(YAXIS, OFF);
@@ -1538,6 +1582,14 @@ float x, y;
 	long xEncOld, yEncOld, xEncNew, yEncNew, xSteps, ySteps, temp;
 	float xPulsPerStep, yPulsPerStep;
 
+	if (!isCalibrated) {
+		if (debugFlag) {
+			printf(" not calibrated\n");
+			fflush(stdout);
+		}
+		return(0);
+	}
+
 	if (x > xMaxInches || x < 0.0) {
 		return(0);
 	}
@@ -1660,6 +1712,10 @@ long int x, y;
 	if (y) {
 		moveOneAxis(YAXIS, y, XYSPEED);
 	}
+	while (isMoving(XAXIS)) {
+	}
+	while (isMoving(YAXIS)) {
+	}
 	motorPower(XAXIS, OFF);
 	motorPower(YAXIS, OFF);
 }
@@ -1732,23 +1788,21 @@ int selfCheck()
 
 
 	if (limitSwitch(XAXIS) || limitSwitch(YAXIS)) {
-		printf("selfCheck() says limit switches active (motor cable unplugged?); no motion test");
-		fflush(stdout);
-	} else {
-		oldEnc = encPosition(XAXIS);
-		moveRel(500,0);
-		encScale = (float) (encPosition(XAXIS) - oldEnc) / 500.0;
-		if (fabs(encScale - 4.0) > 0.01) {
-			printf("Fail X encoder scale (%7.5f)\n", encScale);
-			retVal = FAIL;
-		}
-		oldEnc = encPosition(YAXIS);
-		moveRel(0,500);
-		encScale = (float) (encPosition(YAXIS) - oldEnc) / 500.0;
-		if (fabs(encScale - 4.0) > 0.01) {
-			printf("Fail Y encoder scale (%7.5f)\n", encScale);
-			retVal = FAIL;
-		}
+		backOff();
+	}
+	oldEnc = encPosition(XAXIS);
+	moveRel(200,0);
+	encScale = (float) (encPosition(XAXIS) - oldEnc) / 200.0;
+	if (fabs(encScale - 4.0) > 0.02) {
+		printf("Fail X encoder scale (%7.5f)\n", encScale);
+		retVal = FAIL;
+	}
+	oldEnc = encPosition(YAXIS);
+	moveRel(0,200);
+	encScale = (float) (encPosition(YAXIS) - oldEnc) / 200.0;
+	if (fabs(encScale - 4.0) > 0.02) {
+		printf("Fail Y encoder scale (%7.5f)\n", encScale);
+		retVal = FAIL;
 	}
 	if (retVal == PASS) {
 		printf("passed\n");
@@ -1807,6 +1861,7 @@ void resetGalil()
 {
 
 	tellGalil("RS");
+	sleep(4);
 
 }
 
@@ -1918,7 +1973,7 @@ void statusPrint()
 	printf("Encoder minvals: (X,Y) = (%ld, %ld)\n", xEncMin, yEncMin);
 
 	if (isCalibrated) {
-		printf("Stage position (x,y) %7.3f %7.3f (mm)\n", inchPosition(XAXIS), inchPosition(YAXIS));
+		printf("Stage position (x,y) %7.3f %7.3f (inches)\n", inchPosition(XAXIS), inchPosition(YAXIS));
 	}
 
 	// Print the sensor states
@@ -2025,6 +2080,12 @@ int axis;
 	}
 }
 	
+void stopMotors()
+{
+
+	tellGalil("ST");
+}
+
 
 /*-------------------------------------------------------------------
 
@@ -2125,9 +2186,21 @@ char *ipaddress;
 void testFunction()
 {
 
+	int i, speed;
 
-	printf("xMaxInches = %f\n", xMaxInches);
-	printf("yMaxInches = %f\n", yMaxInches);
-	printf("zMaxInches = %f\n", zMaxInches);
+	for (i = 2; i < 9; i++) {
+		speed = 500 * i + 250;
+		printf("speed = %d\n", speed);
+		moveOneAxis(YAXIS, -3000, speed);
+		while (isMoving(YAXIS)) {
+		}
+		sleep(1);
+		moveOneAxis(YAXIS, 3000, speed);
+		while (isMoving(YAXIS)) {
+		}
+		sleep(1);
+	}
+	motorPower(YAXIS, OFF);
 
 }
+
